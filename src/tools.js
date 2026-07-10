@@ -131,9 +131,10 @@ export const toolDefs = [
     name: 'log_gap',
     description:
       "Log a request Alex couldn't fulfill — either because no department/sub-agent exists for it yet, " +
-      'or because something failed. ALWAYS call this instead of pretending to do something you cannot ' +
-      'actually do (e.g. reminders with real alerts, Finance, Health, Learning, Lifestyle, or Research ' +
-      'requests — those agents do not exist yet).',
+      'or because something failed. Do NOT use this for coursework/study/Canvas-sync requests — those ' +
+      'have a real sub-agent (delegate_to_learning_agent), so always try that first. ALWAYS call this ' +
+      'instead of pretending to do something you cannot actually do (e.g. reminders with real alerts, ' +
+      'Finance, Health, Lifestyle, or Research requests — those agents do not exist yet).',
     input_schema: {
       type: 'object',
       properties: {
