@@ -1,0 +1,22 @@
+{
+  "name": "alex-ceo",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Alex — Chief of Staff Telegram agent (Phase 1: core orchestrator)",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "mcp": "node src/mcpServer.js",
+    "remote-mcp": "node src/remoteMcpServer.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.32.1",
+    "@modelcontextprotocol/sdk": "^1.0.4",
+    "@supabase/supabase-js": "^2.45.4",
+    "dotenv": "^16.4.5",
+    "googleapis": "^144.0.0",
+    "node-telegram-bot-api": "^0.66.0",
+    "pdfjs-dist": "^4.10.38"
+  }
+}

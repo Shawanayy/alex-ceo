@@ -1,0 +1,40 @@
+# Render deployment blueprint for Alex's remote MCP server (src/remoteMcpServer.js).
+# This is what makes Alex reachable from Cowork (Cowork requires a public HTTPS MCP endpoint,
+# not a local stdio process). Deploy via Render's "New +" -> "Blueprint" and point it at this repo,
+# or create the service manually in the dashboard using these same settings.
+#
+# All secrets below are marked `sync: false`, meaning Render will NOT read them from this file —
+# you paste the real values into the Render dashboard yourself after the service is created.
+# Nothing secret ever gets committed to git.
+
+services:
+  - type: web
+    name: alex-ceo-mcp
+    env: node
+    plan: free
+    buildCommand: npm install
+    startCommand: node src/remoteMcpServer.js
+    healthCheckPath: /health
+    envVars:
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: ALEX_MODEL
+        value: claude-sonnet-5
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: DEFAULT_USER_ID
+        sync: false
+      - key: ALEX_REMOTE_MCP_TOKEN
+        sync: false
+      - key: N8N_WEBHOOK_URL
+        sync: false
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false
+      - key: GOOGLE_REDIRECT_URI
+        sync: false
+      - key: GOOGLE_REFRESH_TOKEN
+        sync: false
