@@ -4,8 +4,13 @@
 // This is separate from src/mcpServer.js, the local stdio version for classic Claude Desktop —
 // that one won't work for Cowork, this one is built for exactly that.
 //
-// AUTH: every request must include `Authorization: Bearer <ALEX_REMOTE_MCP_TOKEN>`. Without
-// this check anyone who finds the URL could message Alex and touch Shane's real Supabase data —
+// AUTH: the shared secret (ALEX_REMOTE_MCP_TOKEN) must be supplied either as the last path
+// segment — POST /mcp/<token> — or as `Authorization: Bearer <token>`. The path-segment form
+// exists because Cowork/Claude's custom-connector UI only takes a URL (no custom header field,
+// and no support for user-pasted static bearer tokens as of this writing) — so the full connector
+// URL registered in Cowork should be `https://<host>/mcp/<token>`. The header form is kept for
+// anything that CAN send custom headers (curl, other MCP clients). Without one of these checks
+// passing, anyone who finds the base URL could message Alex and touch Shane's real Supabase data —
 // don't deploy this without the token set.
 //
 // Deploy target: Render (see render.yaml). Render sets process.env.PORT itself.
@@ -91,14 +96,22 @@ const httpServer = http.createServer(async (req, res) => {
     return;
   }
 
-  if (req.url !== '/mcp') {
+  // Accept either exactly "/mcp" (auth via header) or "/mcp/<token>" (auth via path — this is
+  // the form Cowork's connector URL should use, since it can't send a custom Authorization header).
+  const url = new URL(req.url, 'http://internal');
+  const segments = url.pathname.split('/').filter(Boolean); // e.g. ["mcp"] or ["mcp", "<token>"]
+
+  if (segments[0] !== 'mcp' || segments.length > 2) {
     res.writeHead(404, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: 'Not found' }));
     return;
   }
 
-  const auth = req.headers['authorization'];
-  if (auth !== `Bearer ${TOKEN}`) {
+  const pathToken = segments[1];
+  const headerAuth = req.headers['authorization'];
+  const authorized = pathToken === TOKEN || headerAuth === `Bearer ${TOKEN}`;
+
+  if (!authorized) {
     res.writeHead(401, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: 'Unauthorized' }));
     return;
@@ -130,5 +143,5 @@ const httpServer = http.createServer(async (req, res) => {
 });
 
 httpServer.listen(PORT, '0.0.0.0', () => {
-  console.log(`[Alex Remote MCP] Listening on port ${PORT} (path: /mcp, health: /health)`);
+  console.log(`[Alex Remote MCP] Listening on port ${PORT} (path: /mcp/<token> or /mcp with header, health: /health)`);
 });
