@@ -62,3 +62,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 const transport = new StdioServerTransport();
 await server.connect(transport);
 console.error('[Alex MCP] Ready — listening on stdio.');
+
+"alex-ceo": {
+  "command": "node",
+  "args": ["/Users/susanpinho/Desktop/Alex CEO/src/mcpServer.js"]
+}
