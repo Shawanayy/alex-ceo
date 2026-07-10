@@ -3,6 +3,7 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 import { supabase } from '../supabaseClient.js';
+import { fetchCanvasEvents, isCanvasConfigured } from '../canvas/canvasFeed.js';
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 const MODEL = process.env.ALEX_MODEL || 'claude-sonnet-5';
@@ -21,6 +22,12 @@ If the request contains raw syllabus text to import, use import_syllabus — it 
 needed, log every dated midterm/final as an assignment, and auto-schedule study sessions counting back \
 from each exam. If asked for a study guide, use generate_study_guide, which builds the guide from Shane's \
 saved flashcards/assignments for that class.
+
+If asked to sync/import/refresh from Canvas, use sync_canvas. It pulls assignment titles and due dates \
+from Shane's Canvas calendar feed and creates/updates classes and assignments accordingly — safe to run \
+repeatedly. Be upfront that it only covers titles and due dates: Canvas grades and points aren't \
+available (OSU has personal API tokens disabled for Shane's account), so grades still need update_grade \
+by hand, and is_exam is a guess based on the title.
 
 Be concise and factual in your final answer — you're reporting back to another agent (Alex), not chatting \
 with Shane directly. Include concrete details (class names, due dates, statuses) rather than vague \
@@ -213,6 +220,17 @@ const toolDefs = [
       },
       required: ['syllabus_text'],
     },
+  },
+  {
+    name: 'sync_canvas',
+    description:
+      "Sync assignment/exam titles and due dates from Shane's Canvas calendar feed into his classes and " +
+      'assignments. Matches existing Canvas-linked classes/assignments by their Canvas course/assignment ' +
+      "ID and updates them instead of duplicating, so it's safe to run repeatedly. Only pulls titles and " +
+      "due dates — Canvas grades and points aren't available this way (OSU has personal API tokens " +
+      'disabled for this account), so grades still need update_grade. is_exam is guessed from the title, ' +
+      'same as import_syllabus.',
+    input_schema: { type: 'object', properties: {} },
   },
 ];
 
@@ -582,6 +600,118 @@ ${syllabus_text.slice(0, 12000)}`;
   };
 }
 
+// "final" and "test" alone are too generic (false-positive on things like "Final Project Report"
+// or "Test-taking strategies essay"), so we only match the more reliable, specific signals.
+function guessIsExam(title) {
+  return /\b(exam|midterm|quiz)\b/i.test(title);
+}
+
+// Finds the class already linked to this Canvas course, or links/creates one. Tries a name match
+// against existing manually-created classes first so we don't duplicate what Shane already added
+// by hand — we only create a brand-new class if nothing matches.
+async function resolveOrCreateClassByCanvasId({ courseId, courseCode }) {
+  const { data: existing, error } = await supabase
+    .from('classes')
+    .select('id')
+    .eq('canvas_course_id', String(courseId))
+    .limit(1);
+  if (error) throw error;
+  if (existing?.[0]?.id) return existing[0].id;
+
+  if (courseCode) {
+    const { data: byName, error: nameErr } = await supabase
+      .from('classes')
+      .select('id')
+      .is('canvas_course_id', null)
+      .ilike('name', `%${courseCode}%`)
+      .limit(1);
+    if (nameErr) throw nameErr;
+    if (byName?.[0]?.id) {
+      const { error: linkErr } = await supabase
+        .from('classes')
+        .update({ canvas_course_id: String(courseId) })
+        .eq('id', byName[0].id);
+      if (linkErr) throw linkErr;
+      return byName[0].id;
+    }
+  }
+
+  const { data: created, error: createErr } = await supabase
+    .from('classes')
+    .insert({
+      user_id: DEFAULT_USER_ID,
+      name: courseCode || `Canvas Course ${courseId}`,
+      code: courseCode ?? null,
+      canvas_course_id: String(courseId),
+    })
+    .select()
+    .single();
+  if (createErr) throw createErr;
+  return created.id;
+}
+
+async function syncCanvas() {
+  if (!isCanvasConfigured()) {
+    return { ok: false, error: 'Canvas sync is not configured — CANVAS_ICS_URL is missing from .env.' };
+  }
+
+  const events = await fetchCanvasEvents();
+  if (events.length === 0) {
+    return {
+      ok: true,
+      classes_synced: 0,
+      assignments_created: 0,
+      assignments_updated: 0,
+      message: 'No Canvas assignments with due dates found in the feed.',
+    };
+  }
+
+  const classIdByCourse = new Map();
+  let assignmentsCreated = 0;
+  let assignmentsUpdated = 0;
+
+  for (const ev of events) {
+    let classId = classIdByCourse.get(ev.courseId);
+    if (!classId) {
+      classId = await resolveOrCreateClassByCanvasId({ courseId: ev.courseId, courseCode: ev.courseCode });
+      classIdByCourse.set(ev.courseId, classId);
+    }
+
+    const { data: existingAssignment, error: findErr } = await supabase
+      .from('assignments')
+      .select('id')
+      .eq('canvas_assignment_id', ev.assignmentId)
+      .limit(1);
+    if (findErr) throw findErr;
+
+    const payload = {
+      user_id: DEFAULT_USER_ID,
+      class_id: classId,
+      title: ev.title,
+      due_date: ev.dueDate,
+      is_exam: guessIsExam(ev.title),
+      canvas_assignment_id: ev.assignmentId,
+    };
+
+    if (existingAssignment?.[0]?.id) {
+      const { error: updateErr } = await supabase.from('assignments').update(payload).eq('id', existingAssignment[0].id);
+      if (updateErr) throw updateErr;
+      assignmentsUpdated += 1;
+    } else {
+      const { error: insertErr } = await supabase.from('assignments').insert(payload);
+      if (insertErr) throw insertErr;
+      assignmentsCreated += 1;
+    }
+  }
+
+  return {
+    ok: true,
+    classes_synced: classIdByCourse.size,
+    assignments_created: assignmentsCreated,
+    assignments_updated: assignmentsUpdated,
+  };
+}
+
 async function runLearningTool(name, input) {
   switch (name) {
     case 'add_class':
@@ -612,6 +742,8 @@ async function runLearningTool(name, input) {
       return generateStudyGuide(input);
     case 'import_syllabus':
       return importSyllabus(input);
+    case 'sync_canvas':
+      return syncCanvas(input);
     default:
       throw new Error(`Unknown Learning & Career Agent tool: ${name}`);
   }
