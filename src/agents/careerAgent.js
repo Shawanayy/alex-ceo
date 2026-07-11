@@ -191,17 +191,35 @@ async function searchJobs({ track, what, where, results_limit }) {
 
   const { data: profile, error: profileError } = await supabase
     .from('career_profile')
-    .select('years_experience')
+    .select('years_experience, job_search_locations')
     .eq('user_id', DEFAULT_USER_ID)
     .single();
   if (profileError) throw profileError;
   const yearsExperience = profile?.years_experience ?? 0;
 
+  // For the two known tracks, the location is authoritative server-side — pulled straight from
+  // career_profile.job_search_locations — rather than trusting whatever `where` string the model
+  // passed in. The model has previously reconstructed "Corvallis, OR" from memory instead of using
+  // the profile's saved (disambiguated, zip-qualified) value, which Adzuna's geocoder then silently
+  // resolved to a same-named town in a different state. Only the freeform 'other' track uses the
+  // model-supplied `where` as-is.
+  const TRACK_LOCATION_TYPE = {
+    oregon_side_job: 'any side job for college',
+    oahu_engineering_internship: 'engineering internship',
+  };
+  let effectiveWhere = where;
+  if (TRACK_LOCATION_TYPE[track]) {
+    const savedLocation = (profile?.job_search_locations ?? []).find(
+      (l) => l.type === TRACK_LOCATION_TYPE[track]
+    );
+    if (savedLocation?.location) effectiveWhere = savedLocation.location;
+  }
+
   const limit = results_limit ?? 8;
   // Defensive: strip parenthetical notes / anything past a comma-separated "City, ST" so a stray
   // profile note (e.g. "Corvallis, OR (Oregon State area preferred)") never reaches Adzuna's
   // geocoder — that has previously caused it to silently fall back to an unrelated location.
-  const cleanWhere = (where ?? '').replace(/\([^)]*\)/g, '').trim();
+  const cleanWhere = (effectiveWhere ?? '').replace(/\([^)]*\)/g, '').trim();
 
   const params = new URLSearchParams({
     app_id: ADZUNA_APP_ID,
