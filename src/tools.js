@@ -1,6 +1,7 @@
 import { supabase } from './supabaseClient.js';
 import { runAdminAgent } from './agents/adminAgent.js';
 import { runLearningAgent } from './agents/learningAgent.js';
+import { runCareerAgent } from './agents/careerAgent.js';
 
 const N8N_WEBHOOK_URL = process.env.N8N_WEBHOOK_URL;
 
@@ -108,6 +109,29 @@ export const toolDefs = [
     },
   },
   {
+    name: 'delegate_to_career_coach',
+    description:
+      "Hand a job search, LinkedIn, or interview prep request off to the Career Coach, a specialist " +
+      "sub-agent with real access to Shane's career profile (resume, cover letters, education, skills), " +
+      'live job search via Adzuna, and his tracked applications. Use this for: searching for jobs (side ' +
+      "jobs/part-time work near Corvallis/OSU, or engineering internships in Oahu), listing or updating the " +
+      "status of jobs he's applied to (applied, interviewing, offer, rejected, not interested), drafting a " +
+      "LinkedIn post about something he did (draft only, never actually posted), and generating interview " +
+      'prep tied to a specific application. Pass along enough context (job title/company/id when updating ' +
+      'status, event description for LinkedIn posts, which application for interview prep) for it to act ' +
+      'without asking Shane anything else.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        request: {
+          type: 'string',
+          description: 'A clear, self-contained description of what to do.',
+        },
+      },
+      required: ['request'],
+    },
+  },
+  {
     name: 'trigger_n8n',
     description:
       "DEFAULT tool for anything that belongs on Shane's LifeOS dashboard. Use this — not add_task, not " +
@@ -200,6 +224,11 @@ async function delegateToLearningAgent({ request }) {
   return { ok: true, result };
 }
 
+async function delegateToCareerCoach({ request }) {
+  const result = await runCareerAgent(request);
+  return { ok: true, result };
+}
+
 async function triggerN8n({ request }) {
   if (!N8N_WEBHOOK_URL) {
     throw new Error('Missing N8N_WEBHOOK_URL in .env');
@@ -249,6 +278,8 @@ export async function runTool(name, input, telegramMessageId) {
       return delegateToAdminAgent(input);
     case 'delegate_to_learning_agent':
       return delegateToLearningAgent(input);
+    case 'delegate_to_career_coach':
+      return delegateToCareerCoach(input);
     case 'trigger_n8n':
       return triggerN8n(input);
     case 'log_gap':

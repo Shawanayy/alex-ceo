@@ -28,6 +28,10 @@ services:
         sync: false
       - key: CANVAS_ICS_URL
         sync: false
+      - key: ADZUNA_APP_ID
+        sync: false
+      - key: ADZUNA_APP_KEY
+        sync: false
       - key: ALEX_REMOTE_MCP_TOKEN
         sync: false
       - key: N8N_WEBHOOK_URL
