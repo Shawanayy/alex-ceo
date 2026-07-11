@@ -3,6 +3,7 @@ import { runAdminAgent } from './agents/adminAgent.js';
 import { runLearningAgent } from './agents/learningAgent.js';
 import { runCareerAgent } from './agents/careerAgent.js';
 import { runResumeAgent } from './agents/resumeAgent.js';
+import { runSkillAgent } from './agents/skillAgent.js';
 
 const N8N_WEBHOOK_URL = process.env.N8N_WEBHOOK_URL;
 
@@ -155,6 +156,28 @@ export const toolDefs = [
     },
   },
   {
+    name: 'delegate_to_skill_agent',
+    description:
+      "Hand a skill-building request off to the Skill Development Agent, a specialist sub-agent with real " +
+      "access to Shane's tracked skills, milestones, practice sessions, and saved resources. Covers ANY " +
+      "skill he wants to get better at, technical or not, even if it overlaps with a class (e.g. \"get " +
+      "better at Python for CS 361\" belongs here, not the Learning & Career Agent — that agent only owns " +
+      "actual classes/assignments/grades/Canvas sync). Use this for: starting to track a new skill, setting " +
+      "or completing milestones, scheduling or logging practice sessions, and saving links/materials tied to " +
+      "a skill. Pass along enough context (skill name, milestone/session details, resource link) for it to " +
+      'act without asking Shane anything else.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        request: {
+          type: 'string',
+          description: 'A clear, self-contained description of what to do.',
+        },
+      },
+      required: ['request'],
+    },
+  },
+  {
     name: 'trigger_n8n',
     description:
       "DEFAULT tool for anything that belongs on Shane's LifeOS dashboard. Use this — not add_task, not " +
@@ -257,6 +280,11 @@ async function delegateToResumeAgent({ request }) {
   return { ok: true, result };
 }
 
+async function delegateToSkillAgent({ request }) {
+  const result = await runSkillAgent(request);
+  return { ok: true, result };
+}
+
 async function triggerN8n({ request }) {
   if (!N8N_WEBHOOK_URL) {
     throw new Error('Missing N8N_WEBHOOK_URL in .env');
@@ -310,6 +338,8 @@ export async function runTool(name, input, telegramMessageId) {
       return delegateToCareerCoach(input);
     case 'delegate_to_resume_agent':
       return delegateToResumeAgent(input);
+    case 'delegate_to_skill_agent':
+      return delegateToSkillAgent(input);
     case 'trigger_n8n':
       return triggerN8n(input);
     case 'log_gap':
