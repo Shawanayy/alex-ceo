@@ -4,6 +4,7 @@ import { runLearningAgent } from './agents/learningAgent.js';
 import { runCareerAgent } from './agents/careerAgent.js';
 import { runResumeAgent } from './agents/resumeAgent.js';
 import { runSkillAgent } from './agents/skillAgent.js';
+import { runScholarshipAgent } from './agents/scholarshipAgent.js';
 
 const N8N_WEBHOOK_URL = process.env.N8N_WEBHOOK_URL;
 
@@ -178,6 +179,30 @@ export const toolDefs = [
     },
   },
   {
+    name: 'delegate_to_scholarship_agent',
+    description:
+      "Hand a scholarship or funding request off to the Scholarship & Funding Agent, a specialist sub-agent " +
+      "with real access to Shane's tracked scholarships and generated essay drafts. Runs on its own " +
+      "deadline-driven cadence, separate from job applications (Career Coach's domain). Use this for: " +
+      "tracking a new scholarship/funding opportunity, listing tracked scholarships, updating a " +
+      "scholarship's status (researching/drafting/submitted/awarded/rejected/not_pursuing) or details, and " +
+      "generating an essay/personal-statement draft tied to a specific tracked scholarship (name is enough " +
+      "— it will look up the id). Its final answer always states any scholarship deadline plainly — surface " +
+      "that deadline back to Shane and apply the deadline capture rule above. Pass along enough context " +
+      '(scholarship name/provider/amount/deadline, or which scholarship an essay is for) for it to act ' +
+      'without asking Shane anything else.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        request: {
+          type: 'string',
+          description: 'A clear, self-contained description of what to do.',
+        },
+      },
+      required: ['request'],
+    },
+  },
+  {
     name: 'trigger_n8n',
     description:
       "DEFAULT tool for anything that belongs on Shane's LifeOS dashboard. Use this — not add_task, not " +
@@ -285,6 +310,11 @@ async function delegateToSkillAgent({ request }) {
   return { ok: true, result };
 }
 
+async function delegateToScholarshipAgent({ request }) {
+  const result = await runScholarshipAgent(request);
+  return { ok: true, result };
+}
+
 async function triggerN8n({ request }) {
   if (!N8N_WEBHOOK_URL) {
     throw new Error('Missing N8N_WEBHOOK_URL in .env');
@@ -340,6 +370,8 @@ export async function runTool(name, input, telegramMessageId) {
       return delegateToResumeAgent(input);
     case 'delegate_to_skill_agent':
       return delegateToSkillAgent(input);
+    case 'delegate_to_scholarship_agent':
+      return delegateToScholarshipAgent(input);
     case 'trigger_n8n':
       return triggerN8n(input);
     case 'log_gap':
