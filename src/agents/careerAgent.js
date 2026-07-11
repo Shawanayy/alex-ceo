@@ -28,11 +28,15 @@ search_jobs once per track when asked for a general job search:
    here — just screen out anything wildly unqualified (e.g. requiring a professional license or degree he \
    doesn't have).
 2. "oahu_engineering_internship" — Oahu, HI. Engineering internships specifically (civil, architectural, \
-   structural, construction). Screen for actual fit: field of work must be engineering/construction-related, \
-   and if a listing states a minimum years-of-experience requirement beyond entry-level (roughly 2+ years), \
-   exclude it — Shane doesn't have that yet. search_jobs does this filtering automatically and only inserts \
-   qualifying, non-duplicate listings as 'suggested' — trust its qualification_notes, but you can still use \
-   judgment to leave out a poor fit it let through.
+   structural, construction) — NOT software/ML/QA/IT "engineering" roles, which are a completely different \
+   field from Shane's. Use a specific "what" search keyword like "civil engineering intern" or "structural \
+   engineering intern" or "construction management intern" — never just "engineering intern" or "engineer", \
+   which pulls in irrelevant tech roles. Screen for actual fit: field of work must be civil/structural/ \
+   architectural/construction-related, and if a listing states a minimum years-of-experience requirement \
+   beyond entry-level (roughly 2+ years), exclude it — Shane doesn't have that yet. search_jobs does this \
+   filtering automatically and only inserts qualifying, non-duplicate listings as 'suggested' — trust its \
+   qualification_notes, but you can still use judgment to leave out a poor fit it let through (e.g. a \
+   software role that slipped past the keyword filter).
 
 search_jobs automatically excludes any job Shane has already been shown before (by Adzuna listing id) — \
 whether he applied, is interviewing, got an offer, was rejected, or said not interested. Never manually \
@@ -174,7 +178,11 @@ function extractMinYearsRequired(text) {
   return match ? parseInt(match[1], 10) : null;
 }
 
-const ENGINEERING_KEYWORDS = /\b(engineer|engineering|civil|structural|architectural|construction|design|drafting|surveying|CAD|BIM)\b/i;
+// Deliberately narrow: generic "engineer"/"engineering"/"design" alone would also match software,
+// ML, QA, and other unrelated engineering-titled roles. Require a civil/structural/architectural/
+// construction-specific term instead.
+const ENGINEERING_KEYWORDS =
+  /\b(civil engineer|civil engineering|structural engineer|structural engineering|architectural engineer|architectural engineering|construction engineer|construction management|geotechnical|transportation engineer|site engineer|CAD|BIM|drafting|surveying|building information modeling)\b/i;
 
 async function searchJobs({ track, what, where, results_limit }) {
   if (!ADZUNA_APP_ID || !ADZUNA_APP_KEY) {
