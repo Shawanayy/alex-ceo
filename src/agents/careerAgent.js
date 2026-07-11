@@ -392,7 +392,7 @@ Include 4-8 relevant hashtags at the end, similar in style to: #Engineering #Civ
 async function generateInterviewPrep({ application_id, round }) {
   const [{ data: application, error: appError }, { data: profile, error: profileError }] = await Promise.all([
     supabase.from('job_applications').select('*').eq('id', application_id).single(),
-    supabase.from('career_profile').select('resume_text, cover_letter_samples').eq('user_id', DEFAULT_USER_ID).single(),
+    supabase.from('career_profile').select('resume_text_short, cover_letter_samples').eq('user_id', DEFAULT_USER_ID).single(),
   ]);
   if (appError) throw appError;
   if (profileError) throw profileError;
@@ -417,7 +417,7 @@ Description:
 ${(application.description ?? '(no description saved)').slice(0, 4000)}
 
 SHANE'S RESUME
-${profile?.resume_text ?? '(no resume on file)'}
+${profile?.resume_text_short ?? '(no resume on file)'}
 
 SHANE'S COVER LETTER SAMPLES (for tone/background reference — pick the most relevant if one applies)
 ${coverLetters || '(none on file)'}

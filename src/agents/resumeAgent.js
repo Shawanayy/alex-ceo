@@ -17,28 +17,40 @@ Shane is a rising Architectural Engineering student at Oregon State (expected gr
 Student Intern I at the State of Hawaii Dept. of Transportation. Your job is to keep his professional \
 materials current and ready to use the moment an opportunity comes up ("ready for opportunities").
 
+Shane maintains TWO main resumes, both stored in career_profile:
+- resume_text_short — his tight, main resume. This is the DEFAULT for everything (cover letters, quick \
+edits, general questions about "my resume") unless Shane explicitly says "long resume" or "both".
+- resume_text_long — a fuller, more detailed version with more history and project detail. Only touch this \
+one when Shane explicitly asks for the long resume, or for sync_portfolio_from_resume (which reads it \
+because it has more extractable detail).
+When Shane says "update my resume" with no version specified, that means resume_text_short only — leave \
+resume_text_long untouched unless he says otherwise.
+
 You share two pieces of state with the Career Coach agent, and changes you make here flow directly into it:
-- career_profile.resume_text and cover_letter_samples — the same fields Career Coach's interview prep and \
-LinkedIn drafting read from. Keeping resume_text accurate here is what keeps those features accurate too.
+- career_profile.resume_text_short / resume_text_long and cover_letter_samples — the same fields Career \
+Coach's interview prep and LinkedIn drafting read from (it uses the short one). Keeping these accurate here \
+is what keeps those features accurate too.
 - job_applications (owned by Career Coach) — you only ever READ this table, to pull a specific job's title/ \
 company/description when generating a cover letter tied to it. Never create, delete, or change the status of \
 an application yourself — that's Career Coach's job.
 
 Your three responsibilities:
 1. **Resume updates** — when Shane tells you about a new experience, skill, role, or accomplishment, call \
-update_resume to fold it into his stored resume_text. Default to 'incremental' mode (merge the new detail \
-into the existing resume, preserving its structure/tone) unless Shane has pasted a complete replacement \
-resume, in which case use 'replace' mode with the exact text he gave you — never rewrite or embellish text \
-he explicitly pasted verbatim. Always call get_resume_profile first if you need to see the current resume.
+update_resume to fold it into his stored resume (defaults to the short resume — pass version: 'long' only if \
+he asks for the long one, or call it twice if he wants both updated). Default to 'incremental' mode (merge \
+the new detail into the existing resume, preserving its structure/tone) unless Shane has pasted a complete \
+replacement resume, in which case use 'replace' mode with the exact text he gave you — never rewrite or \
+embellish text he explicitly pasted verbatim. Always call get_resume_profile first if you need to see the \
+current resume(s).
 2. **Portfolio** — maintain a running list of Shane's real projects/work (portfolio_items): title, what it \
 was, his role, skills used, dates, and a link if there is one. Use add_portfolio_item when Shane describes \
 something new, update_portfolio_item to correct/expand an existing entry, list_portfolio_items to review \
-what's tracked, and sync_portfolio_from_resume to auto-extract portfolio-worthy entries out of his resume \
-and cover letter samples (useful for an initial fill or after a big resume update) — it skips anything that \
-already looks like a duplicate by title.
+what's tracked, and sync_portfolio_from_resume to auto-extract portfolio-worthy entries out of the long \
+resume and cover letter samples (useful for an initial fill or after a big resume update) — it skips \
+anything that already looks like a duplicate by title.
 3. **Cover letters** — generate_cover_letter always ties to a specific tracked job application_id (get it \
 from Alex/Shane — never invent one; if unsure, say the Career Coach's list_applications should be checked \
-first). It grounds the letter in Shane's real resume, cover letter samples (for tone/structure), and \
+first). It grounds the letter in Shane's short resume, cover letter samples (for tone/structure), and \
 portfolio items, tailored to that job's actual saved description. Drafting only — nothing is ever sent \
 anywhere. list_cover_letters shows what's already been drafted for review.
 
@@ -50,8 +62,8 @@ const toolDefs = [
   {
     name: 'get_resume_profile',
     description:
-      "Fetch Shane's current resume text, cover letter samples, key skills, target fields, field of study, " +
-      'school, and education level from his career profile.',
+      "Fetch Shane's current short AND long resume text, cover letter samples, key skills, target fields, " +
+      'field of study, school, and education level from his career profile.',
     input_schema: { type: 'object', properties: {} },
   },
   {
@@ -60,10 +72,17 @@ const toolDefs = [
       "Update Shane's stored resume text. 'incremental' mode (default) merges a described change into the " +
       "existing resume via careful editing, preserving its structure/tone. 'replace' mode overwrites it " +
       "with an exact resume text Shane provided verbatim (use this whenever he pastes a full resume rather " +
-      'than describing a change). Every update is logged.',
+      "than describing a change). Defaults to the short resume — pass version: 'long' if Shane specifically " +
+      'asked for the long resume, or call this tool twice (once per version) if he wants both updated. ' +
+      'Every update is logged.',
     input_schema: {
       type: 'object',
       properties: {
+        version: {
+          type: 'string',
+          enum: ['short', 'long'],
+          description: "Which resume to update. Defaults to 'short'.",
+        },
         mode: { type: 'string', enum: ['incremental', 'replace'], description: "Defaults to 'incremental'." },
         change_description: {
           type: 'string',
@@ -155,14 +174,18 @@ const toolDefs = [
 async function getResumeProfile() {
   const { data, error } = await supabase
     .from('career_profile')
-    .select('resume_text, cover_letter_samples, key_skills, target_fields, field_of_study, school, education_level')
+    .select(
+      'resume_text_short, resume_text_long, cover_letter_samples, key_skills, target_fields, field_of_study, school, education_level'
+    )
     .eq('user_id', DEFAULT_USER_ID)
     .single();
   if (error) throw error;
   return { ok: true, profile: data };
 }
 
-async function updateResume({ mode, change_description, full_resume_text }) {
+async function updateResume({ version, mode, change_description, full_resume_text }) {
+  const effectiveVersion = version === 'long' ? 'long' : 'short';
+  const column = effectiveVersion === 'long' ? 'resume_text_long' : 'resume_text_short';
   const effectiveMode = mode ?? 'incremental';
 
   if (effectiveMode === 'replace') {
@@ -171,18 +194,21 @@ async function updateResume({ mode, change_description, full_resume_text }) {
     }
     const { error } = await supabase
       .from('career_profile')
-      .update({ resume_text: full_resume_text, updated_at: new Date().toISOString() })
+      .update({ [column]: full_resume_text, updated_at: new Date().toISOString() })
       .eq('user_id', DEFAULT_USER_ID);
     if (error) throw error;
 
     const { data: logRow, error: logError } = await supabase
       .from('resume_update_log')
-      .insert({ user_id: DEFAULT_USER_ID, change_summary: 'Full resume replaced with provided text.' })
+      .insert({
+        user_id: DEFAULT_USER_ID,
+        change_summary: `Full ${effectiveVersion} resume replaced with provided text.`,
+      })
       .select()
       .single();
     if (logError) throw logError;
 
-    return { ok: true, mode: 'replace', log: logRow };
+    return { ok: true, version: effectiveVersion, mode: 'replace', log: logRow };
   }
 
   if (!change_description) {
@@ -191,14 +217,14 @@ async function updateResume({ mode, change_description, full_resume_text }) {
 
   const { data: profile, error: profileError } = await supabase
     .from('career_profile')
-    .select('resume_text')
+    .select(column)
     .eq('user_id', DEFAULT_USER_ID)
     .single();
   if (profileError) throw profileError;
 
-  const prompt = `Here is Shane Pinho's current resume text:
+  const prompt = `Here is Shane Pinho's current ${effectiveVersion} resume text:
 
-${profile?.resume_text ?? '(no resume on file yet)'}
+${profile?.[column] ?? '(no resume on file yet)'}
 
 Update it to incorporate the following new information, in his own words:
 
@@ -226,18 +252,24 @@ Return ONLY the full updated resume text, no commentary or preamble.`;
 
   const { error: updateError } = await supabase
     .from('career_profile')
-    .update({ resume_text: updatedResume, updated_at: new Date().toISOString() })
+    .update({ [column]: updatedResume, updated_at: new Date().toISOString() })
     .eq('user_id', DEFAULT_USER_ID);
   if (updateError) throw updateError;
 
   const { data: logRow, error: logError } = await supabase
     .from('resume_update_log')
-    .insert({ user_id: DEFAULT_USER_ID, change_summary: change_description })
+    .insert({ user_id: DEFAULT_USER_ID, change_summary: `[${effectiveVersion}] ${change_description}` })
     .select()
     .single();
   if (logError) throw logError;
 
-  return { ok: true, mode: 'incremental', updated_resume_text: updatedResume, log: logRow };
+  return {
+    ok: true,
+    version: effectiveVersion,
+    mode: 'incremental',
+    updated_resume_text: updatedResume,
+    log: logRow,
+  };
 }
 
 async function addPortfolioItem({ title, description, role, skills_used, link, start_date, end_date }) {
@@ -287,10 +319,12 @@ async function updatePortfolioItem({ item_id, ...fields }) {
 async function syncPortfolioFromResume() {
   const { data: profile, error: profileError } = await supabase
     .from('career_profile')
-    .select('resume_text, cover_letter_samples')
+    .select('resume_text_short, resume_text_long, cover_letter_samples')
     .eq('user_id', DEFAULT_USER_ID)
     .single();
   if (profileError) throw profileError;
+
+  const sourceResume = profile?.resume_text_long ?? profile?.resume_text_short;
 
   const { data: existing, error: existingError } = await supabase
     .from('portfolio_items')
@@ -309,7 +343,7 @@ description, his role, and a list of skills used (if inferable). Only include re
 — not generic skills or education entries alone.
 
 RESUME
-${profile?.resume_text ?? '(none on file)'}
+${sourceResume ?? '(none on file)'}
 
 COVER LETTER SAMPLES
 ${coverLetters || '(none on file)'}
@@ -373,7 +407,7 @@ async function generateCoverLetter({ application_id, notes }) {
       supabase.from('job_applications').select('*').eq('id', application_id).single(),
       supabase
         .from('career_profile')
-        .select('resume_text, cover_letter_samples, field_of_study, school')
+        .select('resume_text_short, cover_letter_samples, field_of_study, school')
         .eq('user_id', DEFAULT_USER_ID)
         .single(),
       supabase.from('portfolio_items').select('*').eq('user_id', DEFAULT_USER_ID),
@@ -405,7 +439,7 @@ Description:
 ${(application.description ?? '(no description saved)').slice(0, 4000)}
 
 SHANE'S RESUME
-${profile?.resume_text ?? '(no resume on file)'}
+${profile?.resume_text_short ?? '(no resume on file)'}
 
 SHANE'S PORTFOLIO
 ${portfolioSummary || '(no portfolio items on file)'}
