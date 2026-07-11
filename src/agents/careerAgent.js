@@ -78,7 +78,14 @@ const toolDefs = [
           description: "Which of Shane's job-search tracks this search is for.",
         },
         what: { type: 'string', description: 'Search keywords, e.g. "civil engineering intern" or "part time"' },
-        where: { type: 'string', description: 'Location, e.g. "Corvallis, OR" or "Honolulu, HI"' },
+        where: {
+          type: 'string',
+          description:
+            'Location as a clean "City, ST" string ONLY, e.g. "Corvallis, OR" or "Honolulu, HI" — no ' +
+            'parenthetical notes or extra text, that breaks Adzuna\'s geocoding. If pulling from the career ' +
+            'profile\'s job_search_locations, use the location field verbatim (it is already clean), never ' +
+            'the notes field.',
+        },
         results_limit: { type: 'integer', description: 'Max new results to save/return, default 8' },
       },
       required: ['track', 'what', 'where'],
@@ -180,11 +187,16 @@ async function searchJobs({ track, what, where, results_limit }) {
   const yearsExperience = profile?.years_experience ?? 0;
 
   const limit = results_limit ?? 8;
+  // Defensive: strip parenthetical notes / anything past a comma-separated "City, ST" so a stray
+  // profile note (e.g. "Corvallis, OR (Oregon State area preferred)") never reaches Adzuna's
+  // geocoder — that has previously caused it to silently fall back to an unrelated location.
+  const cleanWhere = (where ?? '').replace(/\([^)]*\)/g, '').trim();
+
   const params = new URLSearchParams({
     app_id: ADZUNA_APP_ID,
     app_key: ADZUNA_APP_KEY,
     what,
-    where,
+    where: cleanWhere,
     results_per_page: '25',
     'content-type': 'application/json',
   });
