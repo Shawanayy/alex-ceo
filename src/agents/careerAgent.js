@@ -53,7 +53,10 @@ to the role, and a few smart questions for him to ask. Always pass an applicatio
 never invent one.
 
 Be concise and factual in your final answer — you're reporting back to another agent (Alex), not chatting \
-with Shane directly. Include concrete details (job titles, companies, statuses) rather than vague summaries.`;
+with Shane directly. Include concrete details (job titles, companies, statuses) rather than vague summaries. \
+When you call search_jobs, always mention the where_queried value and sample_raw_locations from the tool \
+result in your summary if the returned job locations look wrong/mismatched — that pinpoints whether the \
+problem is the query sent or something upstream on Adzuna's side.`;
 
 const toolDefs = [
   {
@@ -273,7 +276,11 @@ async function searchJobs({ track, what, where, results_limit }) {
   return {
     ok: true,
     track,
+    where_queried: cleanWhere,
     total_results_from_adzuna: results.length,
+    // Unfiltered sample of raw Adzuna result locations, for diagnosing geo-mismatch issues —
+    // if these don't match where_queried, the problem is upstream (Adzuna/query), not our filtering.
+    sample_raw_locations: [...new Set(results.slice(0, 10).map((j) => j.location?.display_name))].slice(0, 5),
     already_seen_skipped: results.filter((j) => seenIds.has(String(j.id))).length,
     new_qualifying_jobs: inserted.length,
     jobs: inserted.map((j) => ({
