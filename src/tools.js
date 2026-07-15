@@ -277,10 +277,11 @@ export const toolDefs = [
       "Hand an investment/portfolio request off to the Investment Analyst Agent, a specialist sub-agent " +
       "with real access to Shane's holdings and portfolio_summary tables, plus live Alpha Vantage market " +
       'data. Use this for: listing his holdings, portfolio totals and returns, concentration/allocation ' +
-      'questions, best/worst performers, live stock quotes, company research, market news, and his ' +
-      'personal "bull and bear of the day." It will NOT give personalized buy/sell investment advice — ' +
-      'that\'s an honest limitation of the agent itself, not a reason to route elsewhere. Do NOT use ' +
-      'trigger_n8n for these — this is a real, working capability.',
+      'questions, best/worst performers, live stock quotes, company research, market news, his ' +
+      'personal "bull and bear of the day," and Wall Street analyst consensus (price target, Buy/Hold/Sell ' +
+      'rating counts — attributed third-party data, not its own opinion). It will NOT give personalized ' +
+      'buy/sell investment advice — that\'s an honest limitation of the agent itself, not a reason to route ' +
+      'elsewhere. Do NOT use trigger_n8n for these — this is a real, working capability.',
     input_schema: {
       type: 'object',
       properties: {

@@ -35,14 +35,22 @@ if no ticker given) — use this for "what's the news on X" or portfolio news su
 is up the most and down the most today (his own personal "bull and bear of the day") — this calls the API \
 once per distinct ticker he holds, so be mindful of the daily rate limit before calling it more than once \
 per conversation.
+- get_analyst_consensus: Wall Street analyst consensus for one ticker — average analyst price target and the \
+current count of Strong Buy/Buy/Hold/Sell/Strong Sell ratings, sourced directly from Alpha Vantage's \
+aggregated data. This is third-party sourced data, not your own opinion — always attribute it plainly (e.g. \
+"per Alpha Vantage's aggregated analyst data") and present the numbers as-is without endorsing or editorializing \
+on top of them.
 If Alpha Vantage returns a rate-limit or error message, report that plainly (e.g. "hit today's API rate \
 limit") rather than inventing numbers.
 
 Important boundary: you are not a licensed financial advisor and must not give personalized buy/sell \
 investment advice or tell Shane what to do with his money. You CAN state plain facts — his portfolio's \
-concentration/performance, a stock's live price/fundamentals/news — that's reporting, not advice. If Shane \
-asks what he should buy/sell/rebalance into, say you can show him the facts but can't make investment \
-recommendations, and suggest he consult a licensed advisor for that.
+concentration/performance, a stock's live price/fundamentals/news, or attributed third-party analyst \
+consensus data (get_analyst_consensus) — that's reporting, not advice, as long as you present it as \
+someone else's aggregated view rather than your own recommendation. If Shane asks what he should personally \
+buy/sell/rebalance into, or asks for YOUR opinion/recommendation, say you can show him the facts (including \
+analyst consensus) but can't make investment recommendations yourself, and suggest he consult a licensed \
+advisor for that.
 
 Alert rules (set_alert_rule, list_alert_rules, deactivate_alert_rule, check_alert_rules): Shane can define \
 his own threshold — currently just 'max_position_pct', the max % any single holding should be of his total \
@@ -138,6 +146,19 @@ const toolDefs = [
       "biggest loser among his holdings (his personal 'bull and bear of the day'). Uses one API call per " +
       'distinct ticker — mindful of the 25/day rate limit.',
     input_schema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'get_analyst_consensus',
+    description:
+      'Get Wall Street analyst consensus for one ticker — average analyst price target and the current ' +
+      'count of Strong Buy/Buy/Hold/Sell/Strong Sell ratings. This is third-party aggregated data from Alpha ' +
+      "Vantage, not Alex's own opinion — present it as attributed consensus data, never as a personal " +
+      'recommendation.',
+    input_schema: {
+      type: 'object',
+      properties: { ticker: { type: 'string', description: "Stock ticker symbol, e.g. 'NVDA'" } },
+      required: ['ticker'],
+    },
   },
   ...alertToolDefs(['max_position_pct']),
 ];
@@ -277,6 +298,42 @@ async function getCompanyOverview({ ticker }) {
   };
 }
 
+// Pulls the analyst-consensus fields off the same Alpha Vantage OVERVIEW payload
+// get_company_overview uses, but surfaces only the consensus fields — kept as a
+// separate tool so it reads clearly as attributed third-party data, not advice.
+async function getAnalystConsensus({ ticker }) {
+  const { data, error } = await alphaVantageRequest({ function: 'OVERVIEW', symbol: ticker });
+  if (error) return { ok: false, error };
+  if (!data || Object.keys(data).length === 0) {
+    return { ok: false, error: `No analyst data returned for '${ticker}' — check the ticker symbol.` };
+  }
+
+  const targetPrice = data.AnalystTargetPrice && data.AnalystTargetPrice !== 'None'
+    ? Number(data.AnalystTargetPrice)
+    : null;
+  const ratingCounts = {
+    strong_buy: Number(data.AnalystRatingStrongBuy ?? 0),
+    buy: Number(data.AnalystRatingBuy ?? 0),
+    hold: Number(data.AnalystRatingHold ?? 0),
+    sell: Number(data.AnalystRatingSell ?? 0),
+    strong_sell: Number(data.AnalystRatingStrongSell ?? 0),
+  };
+  const totalRatings = Object.values(ratingCounts).reduce((sum, n) => sum + n, 0);
+
+  if (targetPrice === null && totalRatings === 0) {
+    return { ok: false, error: `No analyst consensus data available for '${ticker}' on Alpha Vantage.` };
+  }
+
+  return {
+    ok: true,
+    source: 'Alpha Vantage aggregated analyst data (third-party, not Alex\'s own opinion)',
+    ticker: data.Symbol,
+    analyst_target_price: targetPrice,
+    rating_counts: ratingCounts,
+    total_ratings: totalRatings,
+  };
+}
+
 async function getMarketNews({ tickers, limit }) {
   const params = { function: 'NEWS_SENTIMENT', limit: String(limit ?? 5) };
   if (tickers && tickers.length > 0) params.tickers = tickers.join(',');
@@ -370,6 +427,8 @@ async function runInvestmentTool(name, input) {
       return getMarketNews(input);
     case 'get_portfolio_daily_movers':
       return getPortfolioDailyMovers();
+    case 'get_analyst_consensus':
+      return getAnalystConsensus(input);
     case 'set_alert_rule':
       return setAlertRule({ agent: 'investment', ...input });
     case 'list_alert_rules':
