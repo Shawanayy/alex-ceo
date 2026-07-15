@@ -22,7 +22,10 @@ Your two responsibilities:
 1. **Tracking** — add_scholarship to log a new one (name, provider, amount, deadline, requirements, link). \
 list_scholarships to review what's tracked, optionally by status. update_scholarship to move it through \
 statuses (researching → drafting → submitted → awarded/rejected/not_pursuing) or fix details. Always resolve \
-scholarship_id via list_scholarships (matching by name) rather than asking Shane for a UUID.
+scholarship_id via list_scholarships (matching by name) rather than asking Shane for a UUID. Before adding a \
+scholarship, if there's any chance it might already be tracked (e.g. Shane is re-confirming, or you're \
+retrying after an earlier failure), check list_scholarships by name first rather than calling add_scholarship \
+again — the tool itself also guards against exact duplicates, but don't rely on that.
 2. **Essay drafts** — generate_scholarship_essay writes a draft tied to a specific tracked scholarship_id, \
 grounded in Shane's short resume and portfolio items, tailored to the scholarship's prompt/requirements if \
 given. Drafting only — Shane reviews and submits himself. list_scholarship_essays shows what's already been \
@@ -115,6 +118,21 @@ const toolDefs = [
 ];
 
 async function addScholarship({ name, provider, amount, deadline, requirements, url, notes }) {
+  // Guard against duplicates: if a scholarship with a matching name is already tracked for
+  // this user, return that instead of inserting a second copy (covers retries, re-delegation,
+  // or the model re-confirming a scholarship it already added earlier in the same request).
+  const { data: existing, error: existingError } = await supabase
+    .from('scholarships')
+    .select('*')
+    .eq('user_id', DEFAULT_USER_ID)
+    .ilike('name', name)
+    .limit(1)
+    .maybeSingle();
+  if (existingError) throw existingError;
+  if (existing) {
+    return { ok: true, scholarship: existing, duplicate: true, note: 'Already tracked — returned the existing record instead of creating a duplicate.' };
+  }
+
   const { data, error } = await supabase
     .from('scholarships')
     .insert({
@@ -212,7 +230,7 @@ filler. Return ONLY the essay text, no commentary or preamble.`;
 
   const response = await anthropic.messages.create({
     model: MODEL,
-    max_tokens: 1500,
+    max_tokens: 2500,
     messages: [{ role: 'user', content: essayPrompt }],
   });
 

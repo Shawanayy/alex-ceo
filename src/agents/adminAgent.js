@@ -3,9 +3,17 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 import { getCalendarClient, getGmailClient } from '../google/googleClient.js';
+import { supabase } from '../supabaseClient.js';
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 const MODEL = process.env.ALEX_MODEL || 'claude-sonnet-5';
+const DEFAULT_USER_ID = process.env.DEFAULT_USER_ID;
+
+// Shane's calendar is configured in this zone (confirmed via the Calendar API's own
+// calendar-level "timeZone" field). create_event pins to this explicitly rather than
+// leaving Google to guess from a bare/ambiguous dateTime string, which previously caused
+// events to land hours off from the requested time.
+const DEFAULT_TIME_ZONE = 'America/Los_Angeles';
 
 const SYSTEM_PROMPT = `You are the Admin Agent, a specialist sub-agent that Alex (Shane Pinho's Chief of \
 Staff) delegates Calendar and Gmail requests to. You have real tools for Google Calendar and Gmail — use \
@@ -14,6 +22,11 @@ them, don't guess.
 Hard rule: you can create email DRAFTS but you must NEVER send an email. There is no send tool available \
 to you on purpose — if asked to send, explain (in your final answer) that you created a draft instead and \
 Shane needs to review and send it himself from Gmail.
+
+You can create, edit (update), and delete Calendar events. update_event and delete_event both require the \
+event's Google Calendar "id" — get it from list_events first if you don't already have it from earlier in \
+this conversation. Every create/update/delete you make on Google Calendar is automatically mirrored to \
+Shane's LifeOS dashboard, so you don't need a separate step for that.
 
 Be concise and factual in your final answer — you're reporting back to another agent (Alex), not chatting \
 with Shane directly. Include concrete details (event times, email subjects/senders) rather than vague \
@@ -41,8 +54,17 @@ const toolDefs = [
       properties: {
         summary: { type: 'string', description: 'Event title' },
         description: { type: 'string', description: 'Optional event description' },
-        start: { type: 'string', description: 'ISO 8601 start datetime' },
-        end: { type: 'string', description: 'ISO 8601 end datetime' },
+        start: {
+          type: 'string',
+          description:
+            "Start datetime as a bare ISO 8601 local time WITHOUT a UTC offset, e.g. '2026-07-11T14:00:00' " +
+            "for 2pm. Always Shane's local time (America/Los_Angeles) — never include a timezone offset " +
+            'yourself, the tool applies it automatically.',
+        },
+        end: {
+          type: 'string',
+          description: "End datetime, same bare local-time format as start (no UTC offset).",
+        },
         attendees: {
           type: 'array',
           items: { type: 'string' },
@@ -50,6 +72,48 @@ const toolDefs = [
         },
       },
       required: ['summary', 'start', 'end'],
+    },
+  },
+  {
+    name: 'update_event',
+    description:
+      "Edit an existing event on Shane's primary Google Calendar. Only include the fields that should " +
+      'change — omitted fields keep their current value. Requires the event id (from list_events).',
+    input_schema: {
+      type: 'object',
+      properties: {
+        event_id: { type: 'string', description: "The Google Calendar event id to edit." },
+        summary: { type: 'string', description: 'New event title' },
+        description: { type: 'string', description: 'New event description' },
+        start: {
+          type: 'string',
+          description:
+            "New start datetime as a bare ISO 8601 local time WITHOUT a UTC offset, e.g. " +
+            "'2026-07-11T14:00:00' for 2pm. Always Shane's local time (America/Los_Angeles) — never " +
+            'include a timezone offset yourself, the tool applies it automatically.',
+        },
+        end: {
+          type: 'string',
+          description: "New end datetime, same bare local-time format as start (no UTC offset).",
+        },
+        attendees: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'New list of attendee email addresses (replaces the existing list if provided)',
+        },
+      },
+      required: ['event_id'],
+    },
+  },
+  {
+    name: 'delete_event',
+    description: "Delete an event from Shane's primary Google Calendar. Requires the event id (from list_events).",
+    input_schema: {
+      type: 'object',
+      properties: {
+        event_id: { type: 'string', description: 'The Google Calendar event id to delete.' },
+      },
+      required: ['event_id'],
     },
   },
   {
@@ -98,6 +162,41 @@ function buildRawEmail({ to, subject, body }) {
     .replace(/=+$/, '');
 }
 
+// Mirrors a created/updated Google Calendar event into the LifeOS dashboard's calendar_events
+// table, keyed on google_event_id, so Shane's dashboard reflects edits Alex makes without
+// depending on the (currently broken) n8n calendar sync workflow. Sync failures are logged but
+// never thrown — a dashboard mirroring hiccup shouldn't fail the actual Calendar write, which is
+// the part Shane actually asked for.
+async function upsertDashboardEvent(googleEvent) {
+  try {
+    const row = {
+      user_id: DEFAULT_USER_ID,
+      google_event_id: googleEvent.id,
+      gcal_calendar_id: 'primary',
+      title: googleEvent.summary ?? null,
+      description: googleEvent.description ?? null,
+      start_time: googleEvent.start?.dateTime ?? googleEvent.start?.date ?? null,
+      end_time: googleEvent.end?.dateTime ?? googleEvent.end?.date ?? null,
+      source: 'alex',
+    };
+    const { error } = await supabase
+      .from('calendar_events')
+      .upsert(row, { onConflict: 'google_event_id' });
+    if (error) console.error('[Admin Agent] Dashboard sync (upsert) failed:', error.message);
+  } catch (err) {
+    console.error('[Admin Agent] Dashboard sync (upsert) threw:', err?.message ?? err);
+  }
+}
+
+async function deleteDashboardEvent(googleEventId) {
+  try {
+    const { error } = await supabase.from('calendar_events').delete().eq('google_event_id', googleEventId);
+    if (error) console.error('[Admin Agent] Dashboard sync (delete) failed:', error.message);
+  } catch (err) {
+    console.error('[Admin Agent] Dashboard sync (delete) threw:', err?.message ?? err);
+  }
+}
+
 async function listEvents({ time_min, time_max, max_results }) {
   const calendar = getCalendarClient();
   const res = await calendar.events.list({
@@ -125,12 +224,38 @@ async function createEvent({ summary, description, start, end, attendees }) {
     requestBody: {
       summary,
       description: description ?? undefined,
-      start: { dateTime: start },
-      end: { dateTime: end },
+      start: { dateTime: start, timeZone: DEFAULT_TIME_ZONE },
+      end: { dateTime: end, timeZone: DEFAULT_TIME_ZONE },
       attendees: (attendees ?? []).map((email) => ({ email })),
     },
   });
+  await upsertDashboardEvent(res.data);
   return { ok: true, event: { id: res.data.id, htmlLink: res.data.htmlLink } };
+}
+
+async function updateEvent({ event_id, summary, description, start, end, attendees }) {
+  const calendar = getCalendarClient();
+  const requestBody = {};
+  if (summary !== undefined) requestBody.summary = summary;
+  if (description !== undefined) requestBody.description = description;
+  if (start !== undefined) requestBody.start = { dateTime: start, timeZone: DEFAULT_TIME_ZONE };
+  if (end !== undefined) requestBody.end = { dateTime: end, timeZone: DEFAULT_TIME_ZONE };
+  if (attendees !== undefined) requestBody.attendees = attendees.map((email) => ({ email }));
+
+  const res = await calendar.events.patch({
+    calendarId: 'primary',
+    eventId: event_id,
+    requestBody,
+  });
+  await upsertDashboardEvent(res.data);
+  return { ok: true, event: { id: res.data.id, htmlLink: res.data.htmlLink } };
+}
+
+async function deleteEvent({ event_id }) {
+  const calendar = getCalendarClient();
+  await calendar.events.delete({ calendarId: 'primary', eventId: event_id });
+  await deleteDashboardEvent(event_id);
+  return { ok: true, deleted_event_id: event_id };
 }
 
 async function listEmails({ query, max_results }) {
@@ -183,6 +308,10 @@ async function runAdminTool(name, input) {
       return listEvents(input);
     case 'create_event':
       return createEvent(input);
+    case 'update_event':
+      return updateEvent(input);
+    case 'delete_event':
+      return deleteEvent(input);
     case 'list_emails':
       return listEmails(input);
     case 'create_draft':

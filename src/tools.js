@@ -5,6 +5,10 @@ import { runCareerAgent } from './agents/careerAgent.js';
 import { runResumeAgent } from './agents/resumeAgent.js';
 import { runSkillAgent } from './agents/skillAgent.js';
 import { runScholarshipAgent } from './agents/scholarshipAgent.js';
+import { runBudgetingAgent } from './agents/budgetingAgent.js';
+import { runBillPayAgent } from './agents/billPayAgent.js';
+import { runNetWorthAgent } from './agents/netWorthAgent.js';
+import { runInvestmentAgent } from './agents/investmentAgent.js';
 
 const N8N_WEBHOOK_URL = process.env.N8N_WEBHOOK_URL;
 
@@ -203,6 +207,89 @@ export const toolDefs = [
     },
   },
   {
+    name: 'delegate_to_budgeting_agent',
+    description:
+      "Hand a spending-plan request off to the Budgeting Agent, a specialist sub-agent with real access " +
+      "to Shane's LifeOS dashboard finance tables (accounts, budgets, transactions). Use this for: " +
+      'setting or updating a monthly budget for a category, logging an expense or income transaction, ' +
+      "comparing actual spend against budget for this month, checking account balances, and forecasting " +
+      'cash flow forward based on recent spending trends. Do NOT use trigger_n8n for these — this is a ' +
+      'real, working finance capability. Pass along enough context (category, amount, dates) for it to ' +
+      'act without asking Shane anything else.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        request: {
+          type: 'string',
+          description: 'A clear, self-contained description of what to do.',
+        },
+      },
+      required: ['request'],
+    },
+  },
+  {
+    name: 'delegate_to_bill_pay_agent',
+    description:
+      "Hand a recurring-bill request off to the Bill Pay Agent, a specialist sub-agent with real access " +
+      "to Shane's LifeOS dashboard bills table. Use this for: adding or updating a recurring bill (amount, " +
+      'due day, priority, autopay status), listing tracked bills, marking a bill as paid, checking which ' +
+      'bills lack verified autopay, getting the top-priority bills (unpaid, ranked by urgency), and ' +
+      'pushing bill reminders into Shane\'s notifications table for his dashboard and existing weekly- ' +
+      "review scheduler. Do NOT use trigger_n8n for these — this is a real, working capability. Pass " +
+      'along enough context (bill name, amount, due day) for it to act without asking Shane anything else.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        request: {
+          type: 'string',
+          description: 'A clear, self-contained description of what to do.',
+        },
+      },
+      required: ['request'],
+    },
+  },
+  {
+    name: 'delegate_to_net_worth_agent',
+    description:
+      "Hand a net-worth request off to the Net Worth Tracker Agent, a specialist sub-agent with real " +
+      "access to Shane's LifeOS dashboard (portfolio_summary, accounts, and a net_worth_history table it " +
+      'keeps for trend reporting). Use this for: recording/checking his current net worth, listing past ' +
+      'snapshots, and month-over-month or longer trend/progress questions. This is assets only (investments ' +
+      '+ cash) — there is no debt/liability tracking yet, so never imply otherwise. Do NOT use trigger_n8n ' +
+      'for these — this is a real, working capability.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        request: {
+          type: 'string',
+          description: 'A clear, self-contained description of what to do.',
+        },
+      },
+      required: ['request'],
+    },
+  },
+  {
+    name: 'delegate_to_investment_agent',
+    description:
+      "Hand an investment/portfolio request off to the Investment Analyst Agent, a specialist sub-agent " +
+      "with real access to Shane's holdings and portfolio_summary tables, plus live Alpha Vantage market " +
+      'data. Use this for: listing his holdings, portfolio totals and returns, concentration/allocation ' +
+      'questions, best/worst performers, live stock quotes, company research, market news, and his ' +
+      'personal "bull and bear of the day." It will NOT give personalized buy/sell investment advice — ' +
+      'that\'s an honest limitation of the agent itself, not a reason to route elsewhere. Do NOT use ' +
+      'trigger_n8n for these — this is a real, working capability.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        request: {
+          type: 'string',
+          description: 'A clear, self-contained description of what to do.',
+        },
+      },
+      required: ['request'],
+    },
+  },
+  {
     name: 'trigger_n8n',
     description:
       "DEFAULT tool for anything that belongs on Shane's LifeOS dashboard. Use this — not add_task, not " +
@@ -227,9 +314,14 @@ export const toolDefs = [
     description:
       "Log a request Alex couldn't fulfill — either because no department/sub-agent exists for it yet, " +
       'or because something failed. Do NOT use this for coursework/study/Canvas-sync requests — those ' +
-      'have a real sub-agent (delegate_to_learning_agent), so always try that first. ALWAYS call this ' +
-      'instead of pretending to do something you cannot actually do (e.g. reminders with real alerts, ' +
-      'Finance, Health, Lifestyle, or Research requests — those agents do not exist yet).',
+      'have a real sub-agent (delegate_to_learning_agent), nor for budgeting/expense/cash-flow requests ' +
+      '— those have a real sub-agent (delegate_to_budgeting_agent) — nor for recurring-bill requests — ' +
+      'those have a real sub-agent (delegate_to_bill_pay_agent) — nor for net-worth requests — those have ' +
+      'a real sub-agent (delegate_to_net_worth_agent) — nor for portfolio/holdings/stock-quote/company-' +
+      'research requests — those have a real sub-agent (delegate_to_investment_agent) — always try those ' +
+      'first. ALWAYS call this instead of pretending to do something you cannot actually do (e.g. ' +
+      'reminders with real alerts, or Tax, Subscription, Credit, Health, Lifestyle, or Research ' +
+      'requests — those agents do not exist yet).',
     input_schema: {
       type: 'object',
       properties: {
@@ -315,25 +407,65 @@ async function delegateToScholarshipAgent({ request }) {
   return { ok: true, result };
 }
 
+async function delegateToBudgetingAgent({ request }) {
+  const result = await runBudgetingAgent(request);
+  return { ok: true, result };
+}
+
+async function delegateToBillPayAgent({ request }) {
+  const result = await runBillPayAgent(request);
+  return { ok: true, result };
+}
+
+async function delegateToNetWorthAgent({ request }) {
+  const result = await runNetWorthAgent(request);
+  return { ok: true, result };
+}
+
+async function delegateToInvestmentAgent({ request }) {
+  const result = await runInvestmentAgent(request);
+  return { ok: true, result };
+}
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// The n8n webhook is self-hosted behind Tailscale, which can occasionally have transient
+// network blips. Retry a few times with a short backoff before giving up, so a real dashboard
+// capture doesn't get silently dropped by one bad request.
+const N8N_MAX_ATTEMPTS = 3;
+const N8N_RETRY_DELAY_MS = 700;
+
 async function triggerN8n({ request }) {
   if (!N8N_WEBHOOK_URL) {
     throw new Error('Missing N8N_WEBHOOK_URL in .env');
   }
-  const res = await fetch(N8N_WEBHOOK_URL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ text: request, source: 'alex_telegram' }),
-  });
-  if (!res.ok) {
-    throw new Error(`n8n webhook returned ${res.status} ${res.statusText}`);
+
+  let lastError = null;
+  for (let attempt = 1; attempt <= N8N_MAX_ATTEMPTS; attempt += 1) {
+    try {
+      const res = await fetch(N8N_WEBHOOK_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: request, source: 'alex_telegram' }),
+      });
+      if (!res.ok) {
+        throw new Error(`n8n webhook returned ${res.status} ${res.statusText}`);
+      }
+      let data = null;
+      try {
+        data = await res.json();
+      } catch {
+        // n8n may not return JSON — that's fine, still a success.
+      }
+      return { ok: true, n8n_response: data, attempts: attempt };
+    } catch (err) {
+      lastError = err;
+      if (attempt < N8N_MAX_ATTEMPTS) {
+        await sleep(N8N_RETRY_DELAY_MS * attempt);
+      }
+    }
   }
-  let data = null;
-  try {
-    data = await res.json();
-  } catch {
-    // n8n may not return JSON — that's fine, still a success.
-  }
-  return { ok: true, n8n_response: data };
+  throw new Error(`n8n webhook failed after ${N8N_MAX_ATTEMPTS} attempts: ${String(lastError?.message ?? lastError)}`);
 }
 
 async function logGap({ request_summary, reason }, telegramMessageId) {
@@ -372,6 +504,14 @@ export async function runTool(name, input, telegramMessageId) {
       return delegateToSkillAgent(input);
     case 'delegate_to_scholarship_agent':
       return delegateToScholarshipAgent(input);
+    case 'delegate_to_budgeting_agent':
+      return delegateToBudgetingAgent(input);
+    case 'delegate_to_bill_pay_agent':
+      return delegateToBillPayAgent(input);
+    case 'delegate_to_net_worth_agent':
+      return delegateToNetWorthAgent(input);
+    case 'delegate_to_investment_agent':
+      return delegateToInvestmentAgent(input);
     case 'trigger_n8n':
       return triggerN8n(input);
     case 'log_gap':
