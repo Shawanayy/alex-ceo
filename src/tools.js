@@ -9,6 +9,9 @@ import { runBudgetingAgent } from './agents/budgetingAgent.js';
 import { runBillPayAgent } from './agents/billPayAgent.js';
 import { runNetWorthAgent } from './agents/netWorthAgent.js';
 import { runInvestmentAgent } from './agents/investmentAgent.js';
+import { runTaxAgent } from './agents/taxAgent.js';
+import { runSubscriptionAgent } from './agents/subscriptionAgent.js';
+import { runCreditScoreAgent } from './agents/creditScoreAgent.js';
 
 const N8N_WEBHOOK_URL = process.env.N8N_WEBHOOK_URL;
 
@@ -290,6 +293,65 @@ export const toolDefs = [
     },
   },
   {
+    name: 'delegate_to_tax_agent',
+    description:
+      "Hand a tax-prep request off to the Tax Prep Agent, a specialist sub-agent with real access to " +
+      "Shane's LifeOS dashboard tax_items table. Use this for: tracking a deduction, income document he's " +
+      'waiting on (W-2, 1099), or estimated payment for a given tax year, listing tracked tax items, marking ' +
+      'one collected/filed/paid, and checking upcoming tax deadlines. It will NOT give personalized tax ' +
+      'advice — that\'s an honest limitation of the agent itself, not a reason to route elsewhere. Do NOT use ' +
+      'trigger_n8n for these — this is a real, working capability.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        request: {
+          type: 'string',
+          description: 'A clear, self-contained description of what to do.',
+        },
+      },
+      required: ['request'],
+    },
+  },
+  {
+    name: 'delegate_to_subscription_agent',
+    description:
+      "Hand a recurring-subscription request off to the Subscription Monitoring Agent, a specialist " +
+      "sub-agent with real access to Shane's LifeOS dashboard subscriptions table. Use this for: " +
+      'adding/updating a subscription (amount, billing cycle, next charge date, trial status), listing ' +
+      'tracked subscriptions, cancelling one, checking upcoming charges or trials about to convert, totaling ' +
+      'monthly subscription spend, and pushing subscription reminders to the dashboard. Do NOT use ' +
+      'trigger_n8n for these — this is a real, working capability.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        request: {
+          type: 'string',
+          description: 'A clear, self-contained description of what to do.',
+        },
+      },
+      required: ['request'],
+    },
+  },
+  {
+    name: 'delegate_to_credit_agent',
+    description:
+      "Hand a credit-score request off to the Credit Score Monitoring Agent, a specialist sub-agent with " +
+      "real access to Shane's LifeOS dashboard credit_score_history table. Use this for: recording a credit " +
+      'score Shane reports, checking his current/most recent score, listing past snapshots, and ' +
+      'month-over-month or longer trend questions. There is no live credit bureau integration — it only ' +
+      'records scores Shane tells it. Do NOT use trigger_n8n for these — this is a real, working capability.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        request: {
+          type: 'string',
+          description: 'A clear, self-contained description of what to do.',
+        },
+      },
+      required: ['request'],
+    },
+  },
+  {
     name: 'trigger_n8n',
     description:
       "DEFAULT tool for anything that belongs on Shane's LifeOS dashboard. Use this — not add_task, not " +
@@ -318,10 +380,12 @@ export const toolDefs = [
       '— those have a real sub-agent (delegate_to_budgeting_agent) — nor for recurring-bill requests — ' +
       'those have a real sub-agent (delegate_to_bill_pay_agent) — nor for net-worth requests — those have ' +
       'a real sub-agent (delegate_to_net_worth_agent) — nor for portfolio/holdings/stock-quote/company-' +
-      'research requests — those have a real sub-agent (delegate_to_investment_agent) — always try those ' +
-      'first. ALWAYS call this instead of pretending to do something you cannot actually do (e.g. ' +
-      'reminders with real alerts, or Tax, Subscription, Credit, Health, Lifestyle, or Research ' +
-      'requests — those agents do not exist yet).',
+      'research requests — those have a real sub-agent (delegate_to_investment_agent) — nor for tax-prep ' +
+      'requests — those have a real sub-agent (delegate_to_tax_agent) — nor for subscription requests — ' +
+      'those have a real sub-agent (delegate_to_subscription_agent) — nor for credit-score requests — ' +
+      'those have a real sub-agent (delegate_to_credit_agent) — always try those first. ALWAYS call this ' +
+      'instead of pretending to do something you cannot actually do (e.g. reminders with real alerts, or ' +
+      'Health, Lifestyle, or Research requests — those agents do not exist yet).',
     input_schema: {
       type: 'object',
       properties: {
@@ -427,6 +491,21 @@ async function delegateToInvestmentAgent({ request }) {
   return { ok: true, result };
 }
 
+async function delegateToTaxAgent({ request }) {
+  const result = await runTaxAgent(request);
+  return { ok: true, result };
+}
+
+async function delegateToSubscriptionAgent({ request }) {
+  const result = await runSubscriptionAgent(request);
+  return { ok: true, result };
+}
+
+async function delegateToCreditAgent({ request }) {
+  const result = await runCreditScoreAgent(request);
+  return { ok: true, result };
+}
+
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 // The n8n webhook is self-hosted behind Tailscale, which can occasionally have transient
@@ -512,6 +591,12 @@ export async function runTool(name, input, telegramMessageId) {
       return delegateToNetWorthAgent(input);
     case 'delegate_to_investment_agent':
       return delegateToInvestmentAgent(input);
+    case 'delegate_to_tax_agent':
+      return delegateToTaxAgent(input);
+    case 'delegate_to_subscription_agent':
+      return delegateToSubscriptionAgent(input);
+    case 'delegate_to_credit_agent':
+      return delegateToCreditAgent(input);
     case 'trigger_n8n':
       return triggerN8n(input);
     case 'log_gap':
