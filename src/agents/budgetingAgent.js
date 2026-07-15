@@ -4,6 +4,7 @@ dotenv.config();
 
 import { supabase } from '../supabaseClient.js';
 import { alertToolDefs, setAlertRule, listAlertRules, deactivateAlertRule, evaluateRules, pushAlertNotifications } from '../alerts.js';
+import { plaidClient } from '../plaidClient.js';
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 const MODEL = process.env.ALEX_MODEL || 'claude-sonnet-5';
@@ -18,14 +19,21 @@ budget, and give a simple cash-flow forecast based on his current account balanc
 trend.
 
 Notes on the data:
-- "accounts" holds Shane's current balances per account (Checking, MMA, Roth IRA, Robinhood, etc.) — this \
-is manually maintained today; a future Plaid sync will keep it current automatically, but don't assume \
-that's live yet unless told otherwise.
-- "transactions" is the single ledger for both manually logged expenses/income AND (eventually) \
-Plaid-synced transactions. Always log expenses here via log_transaction so budget comparisons stay \
-accurate.
+- "accounts" holds Shane's current balances per account (Checking, MMA, Roth IRA, Robinhood, etc.) — some \
+are manually maintained, others are linked via Plaid and kept current by sync_plaid_transactions.
+- "transactions" is the single ledger for both manually logged expenses/income AND Plaid-synced \
+transactions. Log manual expenses here via log_transaction so budget comparisons stay accurate.
 - "budgets" is one row per category with a monthly_limit. set_budget upserts by category, so calling it \
 again for the same category just updates the limit.
+
+Plaid bank sync (list_plaid_connections, sync_plaid_transactions): Shane can link real bank accounts via \
+Plaid for automatic balance/transaction sync. Linking a NEW bank has to happen in a browser on Shane's own \
+machine — Plaid's secure login widget can't run inside this chat, so if Shane asks to connect a new bank \
+and list_plaid_connections shows no active connection for it, tell him to run 'npm run link' in the project \
+and open the local page it prints (http://localhost:5544 by default) to connect it there. Once at least \
+one bank is linked, sync_plaid_transactions pulls new transactions and refreshed balances for every \
+linked bank — use it whenever Shane asks to sync/refresh/update his accounts from the bank. Never ask for \
+or handle Shane's actual bank username/password yourself.
 
 Alert rules (set_alert_rule, list_alert_rules, deactivate_alert_rule, check_alert_rules): Shane can define \
 his own 'category_overrun_pct' threshold — how far over a budget category's limit he's willing to go before \
@@ -103,6 +111,23 @@ const toolDefs = [
         lookback_days: { type: 'integer', description: 'How many days of transaction history to average over, default 30' },
       },
     },
+  },
+  {
+    name: 'list_plaid_connections',
+    description:
+      "List Shane's linked bank connections (institution name, status, when linked) — does not expose " +
+      'access tokens. Use this to check whether a given bank is already connected before telling Shane ' +
+      'to go link it.',
+    input_schema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'sync_plaid_transactions',
+    description:
+      'Pull fresh transactions and account balances from every linked bank via Plaid and write them into ' +
+      "the accounts/transactions tables. Use this whenever Shane asks to sync/refresh/update his accounts " +
+      "or get current balances from the bank. If list_plaid_connections shows no linked banks, this will " +
+      "just report that — tell Shane to run `npm run link` first instead of guessing at numbers.",
+    input_schema: { type: 'object', properties: {} },
   },
   ...alertToolDefs(['category_overrun_pct']),
 ];
@@ -199,6 +224,131 @@ async function listAccounts() {
   return { ok: true, accounts: data };
 }
 
+async function listPlaidConnections() {
+  const { data, error } = await supabase
+    .from('plaid_items')
+    .select('id, institution_name, status, created_at, updated_at')
+    .eq('user_id', DEFAULT_USER_ID)
+    .order('created_at', { ascending: false });
+  if (error) throw error;
+  return { ok: true, connections: data ?? [] };
+}
+
+// Pulls new transactions + refreshed balances for every linked bank, one Plaid Item at a time.
+// Uses Plaid's recommended /transactions/sync (cursor-based, incremental) rather than the older
+// /transactions/get — each item's cursor is persisted on plaid_items so re-syncing only fetches
+// what changed since last time. Amount sign convention: Plaid reports positive = money leaving
+// the account; our transactions table uses negative = expense, so it's flipped on the way in.
+async function syncPlaidTransactions() {
+  const { data: items, error: itemsErr } = await supabase
+    .from('plaid_items')
+    .select('*')
+    .eq('user_id', DEFAULT_USER_ID)
+    .eq('status', 'active');
+  if (itemsErr) throw itemsErr;
+
+  if (!items || items.length === 0) {
+    return {
+      ok: true,
+      institutions_synced: [],
+      note:
+        "No linked bank accounts yet — Shane needs to run `npm run link` and connect one via the local " +
+        'page before a sync has anything to pull.',
+    };
+  }
+
+  let totalAdded = 0;
+  let totalModified = 0;
+  let totalRemoved = 0;
+  const institutionsSynced = [];
+  const errors = [];
+
+  for (const item of items) {
+    try {
+      let cursor = item.sync_cursor ?? undefined;
+      let added = [];
+      let modified = [];
+      let removed = [];
+      let hasMore = true;
+
+      while (hasMore) {
+        const response = await plaidClient.transactionsSync({ access_token: item.access_token, cursor });
+        added = added.concat(response.data.added);
+        modified = modified.concat(response.data.modified);
+        removed = removed.concat(response.data.removed);
+        hasMore = response.data.has_more;
+        cursor = response.data.next_cursor;
+      }
+
+      const upserts = [...added, ...modified].map((t) => ({
+        user_id: DEFAULT_USER_ID,
+        date: t.date,
+        description: t.merchant_name || t.name || null,
+        amount: -Number(t.amount),
+        category: t.personal_finance_category?.primary ?? (Array.isArray(t.category) ? t.category[0] : null) ?? 'Uncategorized',
+        account: t.account_id,
+        plaid_transaction_id: t.transaction_id,
+      }));
+
+      if (upserts.length > 0) {
+        const { error: upsertErr } = await supabase
+          .from('transactions')
+          .upsert(upserts, { onConflict: 'plaid_transaction_id' });
+        if (upsertErr) throw upsertErr;
+      }
+
+      if (removed.length > 0) {
+        const idsToRemove = removed.map((r) => r.transaction_id);
+        const { error: delErr } = await supabase.from('transactions').delete().in('plaid_transaction_id', idsToRemove);
+        if (delErr) throw delErr;
+      }
+
+      const balanceRes = await plaidClient.accountsBalanceGet({ access_token: item.access_token });
+      const accountUpserts = balanceRes.data.accounts.map((a) => ({
+        user_id: DEFAULT_USER_ID,
+        name: `${item.institution_name ?? 'Linked'} ${a.name}`,
+        type: a.subtype || a.type || null,
+        balance: a.balances.current ?? a.balances.available ?? 0,
+        plaid_account_id: a.account_id,
+        plaid_item_id: item.id,
+        updated_at: new Date().toISOString(),
+      }));
+      if (accountUpserts.length > 0) {
+        const { error: accErr } = await supabase
+          .from('accounts')
+          .upsert(accountUpserts, { onConflict: 'plaid_account_id' });
+        if (accErr) throw accErr;
+      }
+
+      await supabase
+        .from('plaid_items')
+        .update({ sync_cursor: cursor, status: 'active', updated_at: new Date().toISOString() })
+        .eq('id', item.id);
+
+      totalAdded += added.length;
+      totalModified += modified.length;
+      totalRemoved += removed.length;
+      institutionsSynced.push(item.institution_name || item.item_id);
+    } catch (err) {
+      const message = err?.response?.data?.error_message || err?.message || String(err);
+      errors.push({ institution: item.institution_name || item.item_id, error: message });
+      await supabase
+        .from('plaid_items')
+        .update({ status: 'error', updated_at: new Date().toISOString() })
+        .eq('id', item.id);
+    }
+  }
+
+  return {
+    ok: errors.length === 0,
+    institutions_synced: institutionsSynced,
+    transactions_added: totalAdded,
+    transactions_modified: totalModified,
+    transactions_removed: totalRemoved,
+    errors: errors.length > 0 ? errors : undefined,
+  };
+}
+
 async function forecastCashFlow({ months_ahead, lookback_days }) {
   const monthsAhead = months_ahead ?? 3;
   const lookbackDays = lookback_days ?? 30;
@@ -275,6 +425,10 @@ async function runBudgetingTool(name, input) {
       return compareBudgetVsActual(input);
     case 'list_accounts':
       return listAccounts();
+    case 'list_plaid_connections':
+      return listPlaidConnections();
+    case 'sync_plaid_transactions':
+      return syncPlaidTransactions();
     case 'forecast_cash_flow':
       return forecastCashFlow(input);
     case 'set_alert_rule':

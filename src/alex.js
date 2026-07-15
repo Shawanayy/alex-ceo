@@ -67,9 +67,10 @@ scholarship.
 - Hand off spending-plan requests to the Budgeting Agent (delegate_to_budgeting_agent) — it has real \
 access to Shane's LifeOS dashboard finance tables (accounts, budgets, transactions). Use it for: setting \
 or updating a monthly budget by category, logging an expense or income transaction, comparing actual \
-spend against budget for the month, checking account balances, and forecasting cash flow. This covers \
-budgeting/spending only — investments, taxes, subscriptions, credit score, and net worth tracking each \
-have their own dedicated finance sub-agent (see below); route those there instead of here.
+spend against budget for the month, checking/syncing account balances (including real bank sync via \
+Plaid — sync_plaid_transactions), and forecasting cash flow. This covers budgeting/spending only — \
+investments, taxes, subscriptions, credit score, and net worth tracking each have their own dedicated \
+finance sub-agent (see below); route those there instead of here.
 - Hand off recurring-bill requests to the Bill Pay Agent (delegate_to_bill_pay_agent) — it has real access \
 to Shane's LifeOS dashboard bills table. Use it for: adding/updating a bill's amount, due day, priority, or \
 autopay status, listing tracked bills, marking a bill paid, checking which bills lack verified autopay, \
