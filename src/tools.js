@@ -69,7 +69,11 @@ export const toolDefs = [
         content: { type: 'string', description: 'The fact/preference to remember, written plainly' },
         memory_type: {
           type: 'string',
-          enum: ['preference', 'fact', 'routine', 'other'],
+          enum: ['Preference', 'Vocabulary', 'Pattern', 'Fact'],
+          description:
+            "'Preference' for how Shane wants things done, 'Pattern' for a routine/recurring behavior " +
+            "(e.g. a categorization rule), 'Vocabulary' for a term/shorthand Shane uses, 'Fact' for " +
+            'anything else worth remembering.',
         },
         importance: {
           type: 'integer',
@@ -433,7 +437,7 @@ async function remember({ content, memory_type, importance }) {
     .from('memories')
     .insert({
       content,
-      memory_type: memory_type ?? 'other',
+      memory_type: memory_type ?? 'Fact',
       importance: importance ?? 3,
     })
     .select()
