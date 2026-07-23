@@ -19,6 +19,13 @@ import { runMedicalRecordsAgent } from './agents/medicalRecordsAgent.js';
 import { runHabitAgent } from './agents/habitAgent.js';
 import { runAppointmentAgent } from './agents/appointmentAgent.js';
 import { runMentalWellnessAgent } from './agents/mentalWellnessAgent.js';
+import { runTravelAgent } from './agents/travelAgent.js';
+import { runShoppingAgent } from './agents/shoppingAgent.js';
+import { runHomeMaintenanceAgent } from './agents/homeMaintenanceAgent.js';
+import { runEntertainmentAgent } from './agents/entertainmentAgent.js';
+import { runGiftAgent } from './agents/giftAgent.js';
+import { runEventPlannerAgent } from './agents/eventPlannerAgent.js';
+import { runConciergeAgent } from './agents/conciergeAgent.js';
 
 const N8N_WEBHOOK_URL = process.env.N8N_WEBHOOK_URL;
 
@@ -469,6 +476,105 @@ export const toolDefs = [
     },
   },
   {
+    name: 'delegate_to_travel_agent',
+    description:
+      "Hand a trip-planning request off to the Travel Planner, a specialist sub-agent with real access to " +
+      "Shane's LifeOS dashboard trips/trip_packing_items tables plus live web search. Use this for: tracking " +
+      'a trip, researching flights/hotels/itineraries, and managing a packing checklist.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        request: { type: 'string', description: 'A clear, self-contained description of what to do.' },
+      },
+      required: ['request'],
+    },
+  },
+  {
+    name: 'delegate_to_shopping_agent',
+    description:
+      "Hand a purchase-research request off to the Shopping Agent, a specialist sub-agent with real access " +
+      "to Shane's LifeOS dashboard shopping_items table plus live web search. Use this for: comparing " +
+      'products/prices/reviews and tracking items through to a purchase decision.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        request: { type: 'string', description: 'A clear, self-contained description of what to do.' },
+      },
+      required: ['request'],
+    },
+  },
+  {
+    name: 'delegate_to_home_maintenance_agent',
+    description:
+      "Hand a home-upkeep request off to the Home Maintenance Agent, a specialist sub-agent with real " +
+      "access to Shane's LifeOS dashboard home_maintenance_records table. Use this for: tracking recurring " +
+      'maintenance tasks, warranties, and household supplies, and checking what\'s due soon.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        request: { type: 'string', description: 'A clear, self-contained description of what to do.' },
+      },
+      required: ['request'],
+    },
+  },
+  {
+    name: 'delegate_to_entertainment_agent',
+    description:
+      "Hand a leisure-planning request off to the Entertainment Planner, a specialist sub-agent with real " +
+      "access to Shane's LifeOS dashboard entertainment_log table plus live web search. Use this for: " +
+      'finding movies/books/restaurants/local events and tracking want-to vs. done with ratings.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        request: { type: 'string', description: 'A clear, self-contained description of what to do.' },
+      },
+      required: ['request'],
+    },
+  },
+  {
+    name: 'delegate_to_gift_agent',
+    description:
+      "Hand a gift-tracking request off to the Gift Planner, a specialist sub-agent with real access to " +
+      "Shane's LifeOS dashboard contacts/gifts tables. Use this for: tracking people and their birthdays/" +
+      'occasions, gift ideas, and ordering reminders.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        request: { type: 'string', description: 'A clear, self-contained description of what to do.' },
+      },
+      required: ['request'],
+    },
+  },
+  {
+    name: 'delegate_to_event_planner_agent',
+    description:
+      "Hand an event-organizing request off to the Event Planner, a specialist sub-agent with real access " +
+      "to Shane's LifeOS dashboard events table. Use this for: tracking an event's date/budget/guest count/" +
+      'vendors/status and checking what\'s coming up soonest.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        request: { type: 'string', description: 'A clear, self-contained description of what to do.' },
+      },
+      required: ['request'],
+    },
+  },
+  {
+    name: 'delegate_to_concierge_agent',
+    description:
+      'Hand a miscellaneous one-off request off to the Personal Concierge, a lightweight specialist sub-' +
+      'agent with live web search and no dashboard storage. Use this for: quick reservations/errands/' +
+      "recommendations lookups that don't need ongoing tracking (if it needs tracking, prefer the relevant " +
+      'Lifestyle specialist instead).',
+    input_schema: {
+      type: 'object',
+      properties: {
+        request: { type: 'string', description: 'A clear, self-contained description of what to do.' },
+      },
+      required: ['request'],
+    },
+  },
+  {
     name: 'trigger_n8n',
     description:
       "DEFAULT tool for anything that belongs on Shane's LifeOS dashboard. Use this — not add_task, not " +
@@ -507,9 +613,17 @@ export const toolDefs = [
       'those have a real sub-agent (delegate_to_medical_records_agent) — nor for habit-tracking requests — ' +
       'those have a real sub-agent (delegate_to_habit_agent) — nor for healthcare-appointment requests — ' +
       'those have a real sub-agent (delegate_to_appointment_agent) — nor for mood/stress check-in requests ' +
-      '— those have a real sub-agent (delegate_to_mental_wellness_agent) — always try those first. ALWAYS ' +
-      'call this instead of pretending to do something you cannot actually do (e.g. reminders with real ' +
-      'alerts, or Lifestyle/Research requests — those agents do not exist yet).',
+      '— those have a real sub-agent (delegate_to_mental_wellness_agent) — nor for trip-planning requests ' +
+      '— those have a real sub-agent (delegate_to_travel_agent) — nor for purchase-research requests — ' +
+      'those have a real sub-agent (delegate_to_shopping_agent) — nor for home-maintenance/warranty/supply ' +
+      'requests — those have a real sub-agent (delegate_to_home_maintenance_agent) — nor for movie/book/' +
+      'restaurant/local-event requests — those have a real sub-agent (delegate_to_entertainment_agent) — ' +
+      'nor for gift/birthday/occasion requests — those have a real sub-agent (delegate_to_gift_agent) — nor ' +
+      'for event-organizing requests — those have a real sub-agent (delegate_to_event_planner_agent) — nor ' +
+      'for miscellaneous one-off reservation/errand/recommendation requests — those have a real sub-agent ' +
+      '(delegate_to_concierge_agent) — always try those first. ALWAYS call this instead of pretending to do ' +
+      'something you cannot actually do (e.g. reminders with real alerts, or Research requests — that ' +
+      'department does not exist yet).',
     input_schema: {
       type: 'object',
       properties: {
@@ -665,6 +779,41 @@ async function delegateToMentalWellnessAgent({ request }) {
   return { ok: true, result };
 }
 
+async function delegateToTravelAgent({ request }) {
+  const result = await runTravelAgent(request);
+  return { ok: true, result };
+}
+
+async function delegateToShoppingAgent({ request }) {
+  const result = await runShoppingAgent(request);
+  return { ok: true, result };
+}
+
+async function delegateToHomeMaintenanceAgent({ request }) {
+  const result = await runHomeMaintenanceAgent(request);
+  return { ok: true, result };
+}
+
+async function delegateToEntertainmentAgent({ request }) {
+  const result = await runEntertainmentAgent(request);
+  return { ok: true, result };
+}
+
+async function delegateToGiftAgent({ request }) {
+  const result = await runGiftAgent(request);
+  return { ok: true, result };
+}
+
+async function delegateToEventPlannerAgent({ request }) {
+  const result = await runEventPlannerAgent(request);
+  return { ok: true, result };
+}
+
+async function delegateToConciergeAgent({ request }) {
+  const result = await runConciergeAgent(request);
+  return { ok: true, result };
+}
+
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 // The n8n webhook is self-hosted behind Tailscale, which can occasionally have transient
@@ -770,6 +919,20 @@ export async function runTool(name, input, telegramMessageId) {
       return delegateToAppointmentAgent(input);
     case 'delegate_to_mental_wellness_agent':
       return delegateToMentalWellnessAgent(input);
+    case 'delegate_to_travel_agent':
+      return delegateToTravelAgent(input);
+    case 'delegate_to_shopping_agent':
+      return delegateToShoppingAgent(input);
+    case 'delegate_to_home_maintenance_agent':
+      return delegateToHomeMaintenanceAgent(input);
+    case 'delegate_to_entertainment_agent':
+      return delegateToEntertainmentAgent(input);
+    case 'delegate_to_gift_agent':
+      return delegateToGiftAgent(input);
+    case 'delegate_to_event_planner_agent':
+      return delegateToEventPlannerAgent(input);
+    case 'delegate_to_concierge_agent':
+      return delegateToConciergeAgent(input);
     case 'trigger_n8n':
       return triggerN8n(input);
     case 'log_gap':
