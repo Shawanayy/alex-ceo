@@ -135,7 +135,7 @@ async function addOrUpdateSubscription({ name, amount, billing_cycle, next_charg
 }
 
 async function listSubscriptions({ status }) {
-  let query = supabase.from('subscriptions').select('*').order('name');
+  let query = supabase.from('subscriptions').select('*').eq('user_id', DEFAULT_USER_ID).order('name');
   if (status) query = query.eq('status', status);
   const { data, error } = await query;
   if (error) throw error;
@@ -159,6 +159,7 @@ async function fetchActiveOrTrialSubscriptions() {
   const { data, error } = await supabase
     .from('subscriptions')
     .select('*')
+    .eq('user_id', DEFAULT_USER_ID)
     .in('status', ['active', 'trial']);
   if (error) throw error;
   return data ?? [];
