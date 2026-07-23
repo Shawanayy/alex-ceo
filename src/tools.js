@@ -12,6 +12,13 @@ import { runInvestmentAgent } from './agents/investmentAgent.js';
 import { runTaxAgent } from './agents/taxAgent.js';
 import { runSubscriptionAgent } from './agents/subscriptionAgent.js';
 import { runCreditScoreAgent } from './agents/creditScoreAgent.js';
+import { runFitnessAgent } from './agents/fitnessAgent.js';
+import { runNutritionAgent } from './agents/nutritionAgent.js';
+import { runSleepAgent } from './agents/sleepAgent.js';
+import { runMedicalRecordsAgent } from './agents/medicalRecordsAgent.js';
+import { runHabitAgent } from './agents/habitAgent.js';
+import { runAppointmentAgent } from './agents/appointmentAgent.js';
+import { runMentalWellnessAgent } from './agents/mentalWellnessAgent.js';
 
 const N8N_WEBHOOK_URL = process.env.N8N_WEBHOOK_URL;
 
@@ -357,6 +364,111 @@ export const toolDefs = [
     },
   },
   {
+    name: 'delegate_to_fitness_agent',
+    description:
+      "Hand an exercise/workout request off to the Fitness Coach, a specialist sub-agent with real access " +
+      "to Shane's LifeOS dashboard workouts table. Use this for: logging a workout (or a skipped one), " +
+      'listing recent workouts, and progress/consistency questions (streaks, frequency, workout-type ' +
+      'breakdown). It gives plain factual feedback only, not personalized training/injury advice.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        request: { type: 'string', description: 'A clear, self-contained description of what to do.' },
+      },
+      required: ['request'],
+    },
+  },
+  {
+    name: 'delegate_to_nutrition_agent',
+    description:
+      "Hand a diet/food request off to the Nutrition Coach, a specialist sub-agent with real access to " +
+      "Shane's LifeOS dashboard nutrition_logs table. Use this for: logging a meal, listing recent meals, " +
+      'daily calorie/macro totals, progress/trend questions, and general grocery/meal suggestions. Not for ' +
+      'personalized medical/clinical dietary advice.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        request: { type: 'string', description: 'A clear, self-contained description of what to do.' },
+      },
+      required: ['request'],
+    },
+  },
+  {
+    name: 'delegate_to_sleep_agent',
+    description:
+      "Hand a sleep request off to the Sleep Coach, a specialist sub-agent with real access to Shane's " +
+      "LifeOS dashboard sleep_logs table. Use this for: logging a night's sleep, listing recent sleep logs, " +
+      'and average-hours/quality trend questions. Not for personalized clinical sleep-disorder advice.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        request: { type: 'string', description: 'A clear, self-contained description of what to do.' },
+      },
+      required: ['request'],
+    },
+  },
+  {
+    name: 'delegate_to_medical_records_agent',
+    description:
+      "Hand a health-record request off to the Medical Records Agent, a specialist sub-agent with real " +
+      "access to Shane's LifeOS dashboard medical_records table. Use this for: adding a prescription/lab " +
+      'result/vaccination/other record, listing records (optionally filtered), and updating a record\'s ' +
+      'status. Structured data only — it does not interpret lab results or give medical advice.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        request: { type: 'string', description: 'A clear, self-contained description of what to do.' },
+      },
+      required: ['request'],
+    },
+  },
+  {
+    name: 'delegate_to_habit_agent',
+    description:
+      "Hand a habit-tracking request off to the Habit Tracking Agent, a specialist sub-agent with real " +
+      "access to Shane's LifeOS dashboard goals/goal_logs tables (goal_type='Habit' only — Savings/Mileage/" +
+      'Completion goals belong elsewhere). Use this for: creating a new habit, listing habits, logging a ' +
+      "day's completion, and streak/consistency questions.",
+    input_schema: {
+      type: 'object',
+      properties: {
+        request: { type: 'string', description: 'A clear, self-contained description of what to do.' },
+      },
+      required: ['request'],
+    },
+  },
+  {
+    name: 'delegate_to_appointment_agent',
+    description:
+      "Hand a healthcare-appointment request off to the Appointment Coordinator, a specialist sub-agent " +
+      "with real access to Shane's LifeOS dashboard appointments table. Use this for: scheduling/tracking " +
+      'an appointment, listing appointments, checking what\'s coming up soonest, and marking one completed/ ' +
+      'cancelled. It does not create Calendar events itself — see the Appointment → Calendar rule below.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        request: { type: 'string', description: 'A clear, self-contained description of what to do.' },
+      },
+      required: ['request'],
+    },
+  },
+  {
+    name: 'delegate_to_mental_wellness_agent',
+    description:
+      "Hand a mood/stress check-in request off to the Mental Wellness Agent, a specialist sub-agent with " +
+      "real access to Shane's LifeOS dashboard mood_logs table. Use this for: logging a mood/stress check-" +
+      'in, listing recent check-ins, and mood/stress trend questions, plus generic mindfulness suggestions. ' +
+      'Deliberately conservative — it does not diagnose or give clinical/therapeutic advice, and will flag ' +
+      'anything that sounds beyond a routine check-in rather than handle it itself.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        request: { type: 'string', description: 'A clear, self-contained description of what to do.' },
+      },
+      required: ['request'],
+    },
+  },
+  {
     name: 'trigger_n8n',
     description:
       "DEFAULT tool for anything that belongs on Shane's LifeOS dashboard. Use this — not add_task, not " +
@@ -388,9 +500,16 @@ export const toolDefs = [
       'research requests — those have a real sub-agent (delegate_to_investment_agent) — nor for tax-prep ' +
       'requests — those have a real sub-agent (delegate_to_tax_agent) — nor for subscription requests — ' +
       'those have a real sub-agent (delegate_to_subscription_agent) — nor for credit-score requests — ' +
-      'those have a real sub-agent (delegate_to_credit_agent) — always try those first. ALWAYS call this ' +
-      'instead of pretending to do something you cannot actually do (e.g. reminders with real alerts, or ' +
-      'Health, Lifestyle, or Research requests — those agents do not exist yet).',
+      'those have a real sub-agent (delegate_to_credit_agent) — nor for exercise/workout requests — those ' +
+      'have a real sub-agent (delegate_to_fitness_agent) — nor for diet/food requests — those have a real ' +
+      'sub-agent (delegate_to_nutrition_agent) — nor for sleep requests — those have a real sub-agent ' +
+      '(delegate_to_sleep_agent) — nor for prescription/lab-result/vaccination/health-record requests — ' +
+      'those have a real sub-agent (delegate_to_medical_records_agent) — nor for habit-tracking requests — ' +
+      'those have a real sub-agent (delegate_to_habit_agent) — nor for healthcare-appointment requests — ' +
+      'those have a real sub-agent (delegate_to_appointment_agent) — nor for mood/stress check-in requests ' +
+      '— those have a real sub-agent (delegate_to_mental_wellness_agent) — always try those first. ALWAYS ' +
+      'call this instead of pretending to do something you cannot actually do (e.g. reminders with real ' +
+      'alerts, or Lifestyle/Research requests — those agents do not exist yet).',
     input_schema: {
       type: 'object',
       properties: {
@@ -511,6 +630,41 @@ async function delegateToCreditAgent({ request }) {
   return { ok: true, result };
 }
 
+async function delegateToFitnessAgent({ request }) {
+  const result = await runFitnessAgent(request);
+  return { ok: true, result };
+}
+
+async function delegateToNutritionAgent({ request }) {
+  const result = await runNutritionAgent(request);
+  return { ok: true, result };
+}
+
+async function delegateToSleepAgent({ request }) {
+  const result = await runSleepAgent(request);
+  return { ok: true, result };
+}
+
+async function delegateToMedicalRecordsAgent({ request }) {
+  const result = await runMedicalRecordsAgent(request);
+  return { ok: true, result };
+}
+
+async function delegateToHabitAgent({ request }) {
+  const result = await runHabitAgent(request);
+  return { ok: true, result };
+}
+
+async function delegateToAppointmentAgent({ request }) {
+  const result = await runAppointmentAgent(request);
+  return { ok: true, result };
+}
+
+async function delegateToMentalWellnessAgent({ request }) {
+  const result = await runMentalWellnessAgent(request);
+  return { ok: true, result };
+}
+
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 // The n8n webhook is self-hosted behind Tailscale, which can occasionally have transient
@@ -602,6 +756,20 @@ export async function runTool(name, input, telegramMessageId) {
       return delegateToSubscriptionAgent(input);
     case 'delegate_to_credit_agent':
       return delegateToCreditAgent(input);
+    case 'delegate_to_fitness_agent':
+      return delegateToFitnessAgent(input);
+    case 'delegate_to_nutrition_agent':
+      return delegateToNutritionAgent(input);
+    case 'delegate_to_sleep_agent':
+      return delegateToSleepAgent(input);
+    case 'delegate_to_medical_records_agent':
+      return delegateToMedicalRecordsAgent(input);
+    case 'delegate_to_habit_agent':
+      return delegateToHabitAgent(input);
+    case 'delegate_to_appointment_agent':
+      return delegateToAppointmentAgent(input);
+    case 'delegate_to_mental_wellness_agent':
+      return delegateToMentalWellnessAgent(input);
     case 'trigger_n8n':
       return triggerN8n(input);
     case 'log_gap':
