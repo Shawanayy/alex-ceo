@@ -26,6 +26,12 @@ import { runEntertainmentAgent } from './agents/entertainmentAgent.js';
 import { runGiftAgent } from './agents/giftAgent.js';
 import { runEventPlannerAgent } from './agents/eventPlannerAgent.js';
 import { runConciergeAgent } from './agents/conciergeAgent.js';
+import { runQaAgent } from './agents/qaAgent.js';
+import { runMemoryAgent } from './agents/memoryAgent.js';
+import { runAutomationAgent } from './agents/automationAgent.js';
+import { runSecurityAgent } from './agents/securityAgent.js';
+import { runDataAnalyticsAgent } from './agents/dataAnalyticsAgent.js';
+import { runNotificationAgent } from './agents/notificationAgent.js';
 
 const N8N_WEBHOOK_URL = process.env.N8N_WEBHOOK_URL;
 
@@ -575,6 +581,98 @@ export const toolDefs = [
     },
   },
   {
+    name: 'delegate_to_qa_agent',
+    description:
+      'Hand a piece of drafted content off to the QA / Review Agent for a final check before Shane sees it — ' +
+      'no tools, no dashboard state, a pure text review pass. Use this BEFORE sending anything with dollar ' +
+      "figures, dates/commitments, or content going somewhere external (a drafted email, a LinkedIn post, an " +
+      'appointment/event confirmation, a financial summary) — not for routine chat replies. Include the ' +
+      'drafted content plus any context needed to judge it (source numbers/facts it should match).',
+    input_schema: {
+      type: 'object',
+      properties: {
+        request: { type: 'string', description: 'The drafted content to review, plus context needed to judge it.' },
+      },
+      required: ['request'],
+    },
+  },
+  {
+    name: 'delegate_to_memory_agent',
+    description:
+      'Hand a memory-management request off to the Memory Agent — for browsing, correcting, re-prioritizing, ' +
+      "or deleting what's been remembered about Shane. Do NOT use this to save a NEW memory — use the " +
+      "'remember' tool for that (it's lighter-weight and already auto-injects into every conversation). Use " +
+      "this agent when Shane wants to search/list past memories, fix a wrong one, change its importance, or " +
+      'forget something.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        request: { type: 'string', description: 'A clear, self-contained description of what to do.' },
+      },
+      required: ['request'],
+    },
+  },
+  {
+    name: 'delegate_to_automation_agent',
+    description:
+      'Hand an automation/workflow request off to the Automation Agent. Real scope: tracking automation ' +
+      'ideas and if-this-then-that rules as a backlog/wishlist, and running schedule-based rules Shane marks ' +
+      "active via the background loop. Alex cannot sign Shane up for new services or connect new apps — say " +
+      'so if asked for that.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        request: { type: 'string', description: 'A clear, self-contained description of what to do.' },
+      },
+      required: ['request'],
+    },
+  },
+  {
+    name: 'delegate_to_security_agent',
+    description:
+      'Hand a digital-hygiene request off to the Security & Privacy Agent — a hygiene CHECKLIST tracker ' +
+      '(password rotation reminders, 2FA reminders, device/app-permission review reminders), not a real ' +
+      "security system. Alex never handles actual passwords/credentials or logs into accounts — if Shane " +
+      'asks for a real password audit or live account monitoring, this agent will say that needs to be done ' +
+      'by Shane himself.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        request: { type: 'string', description: 'A clear, self-contained description of what to do.' },
+      },
+      required: ['request'],
+    },
+  },
+  {
+    name: 'delegate_to_data_analytics_agent',
+    description:
+      'Hand a trends/insights request off to the Data Analytics Agent — read-only across finance, health, ' +
+      'and productivity data, can log computed metrics into the kpis table for tracking over time. Use for ' +
+      'requests like "how am I trending", dashboards, or cross-department summaries.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        request: { type: 'string', description: 'A clear, self-contained description of what to do.' },
+      },
+      required: ['request'],
+    },
+  },
+  {
+    name: 'delegate_to_notification_agent',
+    description:
+      "Hand a notification-triage request off to the Notification Manager — what's pending, what's urgent, " +
+      "reviewing or clearing notifications, or manually flagging something. Note: proactively pushing " +
+      "high/medium urgency notifications to Telegram happens automatically via a background loop, not through " +
+      'this tool — this tool is for on-demand queries/management.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        request: { type: 'string', description: 'A clear, self-contained description of what to do.' },
+      },
+      required: ['request'],
+    },
+  },
+  {
     name: 'trigger_n8n',
     description:
       "DEFAULT tool for anything that belongs on Shane's LifeOS dashboard. Use this — not add_task, not " +
@@ -621,9 +719,15 @@ export const toolDefs = [
       'nor for gift/birthday/occasion requests — those have a real sub-agent (delegate_to_gift_agent) — nor ' +
       'for event-organizing requests — those have a real sub-agent (delegate_to_event_planner_agent) — nor ' +
       'for miscellaneous one-off reservation/errand/recommendation requests — those have a real sub-agent ' +
-      '(delegate_to_concierge_agent) — always try those first. ALWAYS call this instead of pretending to do ' +
-      'something you cannot actually do (e.g. reminders with real alerts, or Research requests — that ' +
-      'department does not exist yet).',
+      '(delegate_to_concierge_agent) — nor for content-review requests — those have a real sub-agent ' +
+      '(delegate_to_qa_agent) — nor for browsing/correcting/forgetting past memories — those have a real ' +
+      'sub-agent (delegate_to_memory_agent) — nor for automation/workflow-idea requests — those have a real ' +
+      'sub-agent (delegate_to_automation_agent) — nor for password-hygiene/security-checklist requests — ' +
+      'those have a real sub-agent (delegate_to_security_agent) — nor for cross-department trend/dashboard ' +
+      'requests — those have a real sub-agent (delegate_to_data_analytics_agent) — nor for notification-' +
+      'triage requests — those have a real sub-agent (delegate_to_notification_agent) — always try those ' +
+      'first. ALWAYS call this instead of pretending to do something you cannot actually do (e.g. Research ' +
+      'requests — that department does not exist yet).',
     input_schema: {
       type: 'object',
       properties: {
@@ -814,6 +918,36 @@ async function delegateToConciergeAgent({ request }) {
   return { ok: true, result };
 }
 
+async function delegateToQaAgent({ request }) {
+  const result = await runQaAgent(request);
+  return { ok: true, result };
+}
+
+async function delegateToMemoryAgent({ request }) {
+  const result = await runMemoryAgent(request);
+  return { ok: true, result };
+}
+
+async function delegateToAutomationAgent({ request }) {
+  const result = await runAutomationAgent(request);
+  return { ok: true, result };
+}
+
+async function delegateToSecurityAgent({ request }) {
+  const result = await runSecurityAgent(request);
+  return { ok: true, result };
+}
+
+async function delegateToDataAnalyticsAgent({ request }) {
+  const result = await runDataAnalyticsAgent(request);
+  return { ok: true, result };
+}
+
+async function delegateToNotificationAgent({ request }) {
+  const result = await runNotificationAgent(request);
+  return { ok: true, result };
+}
+
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 // The n8n webhook is self-hosted behind Tailscale, which can occasionally have transient
@@ -933,6 +1067,18 @@ export async function runTool(name, input, telegramMessageId) {
       return delegateToEventPlannerAgent(input);
     case 'delegate_to_concierge_agent':
       return delegateToConciergeAgent(input);
+    case 'delegate_to_qa_agent':
+      return delegateToQaAgent(input);
+    case 'delegate_to_memory_agent':
+      return delegateToMemoryAgent(input);
+    case 'delegate_to_automation_agent':
+      return delegateToAutomationAgent(input);
+    case 'delegate_to_security_agent':
+      return delegateToSecurityAgent(input);
+    case 'delegate_to_data_analytics_agent':
+      return delegateToDataAnalyticsAgent(input);
+    case 'delegate_to_notification_agent':
+      return delegateToNotificationAgent(input);
     case 'trigger_n8n':
       return triggerN8n(input);
     case 'log_gap':

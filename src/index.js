@@ -5,6 +5,7 @@ import * as pdfjsLib from 'pdfjs-dist/legacy/build/pdf.mjs';
 
 import { handleMessage } from './alex.js';
 import { runLearningAgent } from './agents/learningAgent.js';
+import { startBackgroundLoop } from './backgroundLoop.js';
 
 // Extracts plain text from a PDF buffer using PDF.js (pdfjs-dist), page by page.
 async function extractPdfText(buffer) {
@@ -120,3 +121,6 @@ async function handleDocument(msg, chatId) {
 }
 
 console.log('[Alex] Telegram bot is live (long polling). Message him anytime.');
+
+// The only proactive process in the app — see src/backgroundLoop.js for what it does.
+startBackgroundLoop(bot, ownerId);
