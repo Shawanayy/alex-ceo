@@ -44,3 +44,61 @@ services:
         sync: false
       - key: GOOGLE_REFRESH_TOKEN
         sync: false
+
+  # Render deployment for the actual Telegram bot (src/index.js), so Alex stays reachable on
+  # Telegram 24/7 with no laptop involved. Runs in webhook mode (USE_WEBHOOK=true) rather than
+  # long polling — free-tier Render sleeps the service after inactivity, and webhook mode tolerates
+  # that fine (Telegram just retries delivery until the service wakes back up), whereas long polling
+  # would need to hold an open connection the whole time.
+  #
+  # After this service is live, register the webhook so Telegram knows to push updates here instead
+  # of waiting for polling:
+  #   curl "https://api.telegram.org/bot<TELEGRAM_BOT_TOKEN>/setWebhook?url=https://<this-service>.onrender.com/telegram/<TELEGRAM_BOT_TOKEN>"
+  - type: web
+    name: alex-ceo-bot
+    env: node
+    plan: free
+    buildCommand: npm install
+    startCommand: node src/index.js
+    healthCheckPath: /health
+    envVars:
+      - key: USE_WEBHOOK
+        value: 'true'
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: OWNER_TELEGRAM_USER_ID
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: ALEX_MODEL
+        value: claude-sonnet-5
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: DEFAULT_USER_ID
+        sync: false
+      - key: CANVAS_ICS_URL
+        sync: false
+      - key: ADZUNA_APP_ID
+        sync: false
+      - key: ADZUNA_APP_KEY
+        sync: false
+      - key: ALPHA_VANTAGE_API_KEY
+        sync: false
+      - key: PLAID_CLIENT_ID
+        sync: false
+      - key: PLAID_SECRET
+        sync: false
+      - key: PLAID_ENV
+        value: sandbox
+      - key: N8N_WEBHOOK_URL
+        sync: false
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false
+      - key: GOOGLE_REDIRECT_URI
+        sync: false
+      - key: GOOGLE_REFRESH_TOKEN
+        sync: false

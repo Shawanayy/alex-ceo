@@ -2,6 +2,7 @@ import TelegramBot from 'node-telegram-bot-api';
 import dotenv from 'dotenv';
 dotenv.config();
 import * as pdfjsLib from 'pdfjs-dist/legacy/build/pdf.mjs';
+import http from 'node:http';
 
 import { handleMessage } from './alex.js';
 import { runLearningAgent } from './agents/learningAgent.js';
@@ -37,11 +38,17 @@ if (!process.env.ANTHROPIC_API_KEY) {
 
 console.log('[Alex] Starting up...');
 
-const bot = new TelegramBot(token, { polling: true });
+// In webhook mode (cloud deployment, e.g. Render) Telegram pushes updates to us instead of us
+// polling for them — this lets the process sleep between messages, which is what makes free-tier
+// hosting viable. Locally (npm start) we default to long polling since there's no public HTTPS URL.
+const useWebhook = process.env.USE_WEBHOOK === 'true';
+const bot = new TelegramBot(token, { polling: !useWebhook });
 
-bot.on('polling_error', (err) => {
-  console.error('[Alex] Telegram polling error:', err.message);
-});
+if (!useWebhook) {
+  bot.on('polling_error', (err) => {
+    console.error('[Alex] Telegram polling error:', err.message);
+  });
+}
 
 bot.on('message', async (msg) => {
   const fromId = String(msg.from?.id ?? '');
@@ -120,7 +127,46 @@ async function handleDocument(msg, chatId) {
   }
 }
 
-console.log('[Alex] Telegram bot is live (long polling). Message him anytime.');
+if (useWebhook) {
+  // The bot token doubles as the secret path segment — a request that doesn't know the token
+  // gets a 404, same auth principle as src/remoteMcpServer.js's token-in-path check.
+  const webhookPath = `/telegram/${token}`;
+  const port = process.env.PORT || 8788;
+
+  const server = http.createServer((req, res) => {
+    if (req.method === 'GET' && req.url === '/health') {
+      res.writeHead(200);
+      res.end('ok');
+      return;
+    }
+    if (req.method !== 'POST' || req.url !== webhookPath) {
+      res.writeHead(404);
+      res.end();
+      return;
+    }
+    let body = '';
+    req.on('data', (chunk) => {
+      body += chunk;
+    });
+    req.on('end', () => {
+      try {
+        bot.processUpdate(JSON.parse(body));
+      } catch (err) {
+        console.error('[Alex] Failed to process incoming webhook update:', err.message);
+      }
+      res.writeHead(200);
+      res.end();
+    });
+  });
+
+  server.listen(port, () => {
+    console.log(
+      `[Alex] Telegram bot is live (webhook mode) on port ${port}. Register the webhook URL with Telegram before messaging him.`
+    );
+  });
+} else {
+  console.log('[Alex] Telegram bot is live (long polling). Message him anytime.');
+}
 
 // The only proactive process in the app — see src/backgroundLoop.js for what it does.
 startBackgroundLoop(bot, ownerId);
