@@ -3,6 +3,7 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 import { supabase } from '../supabaseClient.js';
+import { todayLocal } from '../utils/localDate.js';
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 const MODEL = process.env.ALEX_MODEL || 'claude-sonnet-5';
@@ -20,6 +21,12 @@ Notes on the data:
 snacks separately for the same date, so log_meal always inserts a new row rather than upserting.
 - calories/protein/carbs/fat are all optional integers/numbers — capture whatever Shane gives you, leave the \
 rest blank rather than guessing a number.
+- IMPORTANT — avoiding duplicate rows: each delegation from Alex is a fresh, memoryless request, so if Shane \
+first reports a meal (logged with some fields missing) and then, in a *separate* follow-up delegation, supplies \
+the missing calorie/macro numbers for that *same* meal, do NOT call log_meal again — that creates a second, \
+orphaned row. Instead call list_meals({ date: today, limit: 5 }) first, find the most recent entry from today \
+that's missing those fields and plausibly matches what Shane is describing, and call update_meal on that row's \
+id. Only use log_meal when Shane is describing a meal that hasn't been logged yet at all.
 - get_daily_totals sums calories/protein/carbs/fat for a given date (default today) across all meals logged \
 that day — use it whenever Shane asks "how many calories today" or similar.
 - get_nutrition_progress looks at recent history and reports plain facts: average daily calories/protein/carbs/ \
@@ -35,8 +42,10 @@ const toolDefs = [
   {
     name: 'log_meal',
     description:
-      'Log a new meal entry (always inserts, does not overwrite prior meals for the same date). Use this ' +
-      'whenever Shane says what he ate.',
+      'Log a brand-new meal entry that has not been logged yet (always inserts, does not overwrite prior ' +
+      'meals for the same date). Use this when Shane describes a meal for the first time. Do NOT use this for ' +
+      "a follow-up that's just adding calorie/macro numbers to a meal already logged earlier — use update_meal " +
+      'for that instead.',
     input_schema: {
       type: 'object',
       properties: {
@@ -48,6 +57,26 @@ const toolDefs = [
         fat: { type: 'number', description: 'Grams of fat, if known' },
         image_url: { type: 'string', description: 'Optional photo URL of the meal' },
       },
+    },
+  },
+  {
+    name: 'update_meal',
+    description:
+      'Update an already-logged meal entry by id — use this for follow-up messages that add or correct ' +
+      'calorie/macro numbers for a meal Shane already reported, instead of calling log_meal again and creating ' +
+      'a duplicate row. Only the fields provided are changed.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'The id of the nutrition_logs row to update (from list_meals)' },
+        meal_name: { type: 'string' },
+        calories: { type: 'integer', description: 'Calories, if known' },
+        protein: { type: 'integer', description: 'Grams of protein, if known' },
+        carbs: { type: 'integer', description: 'Grams of carbs, if known' },
+        fat: { type: 'number', description: 'Grams of fat, if known' },
+        image_url: { type: 'string' },
+      },
+      required: ['id'],
     },
   },
   {
@@ -81,7 +110,7 @@ const toolDefs = [
 ];
 
 async function logMeal({ date, meal_name, calories, protein, carbs, fat, image_url }) {
-  const row = { user_id: DEFAULT_USER_ID, date: date ?? new Date().toISOString().slice(0, 10) };
+  const row = { user_id: DEFAULT_USER_ID, date: date ?? (await todayLocal()) };
   if (meal_name !== undefined) row.meal_name = meal_name;
   if (calories !== undefined) row.calories = calories;
   if (protein !== undefined) row.protein = protein;
@@ -90,6 +119,21 @@ async function logMeal({ date, meal_name, calories, protein, carbs, fat, image_u
   if (image_url !== undefined) row.image_url = image_url;
 
   const { data, error } = await supabase.from('nutrition_logs').insert(row).select().single();
+  if (error) throw error;
+  return { ok: true, meal: data };
+}
+
+async function updateMeal({ id, meal_name, calories, protein, carbs, fat, image_url }) {
+  if (!id) throw new Error('update_meal requires an id (use list_meals to find it)');
+  const patch = {};
+  if (meal_name !== undefined) patch.meal_name = meal_name;
+  if (calories !== undefined) patch.calories = calories;
+  if (protein !== undefined) patch.protein = protein;
+  if (carbs !== undefined) patch.carbs = carbs;
+  if (fat !== undefined) patch.fat = fat;
+  if (image_url !== undefined) patch.image_url = image_url;
+
+  const { data, error } = await supabase.from('nutrition_logs').update(patch).eq('id', id).select().single();
   if (error) throw error;
   return { ok: true, meal: data };
 }
@@ -104,7 +148,7 @@ async function listMeals({ date, limit }) {
 }
 
 async function getDailyTotals({ date }) {
-  const day = date ?? new Date().toISOString().slice(0, 10);
+  const day = date ?? (await todayLocal());
   const { data, error } = await supabase.from('nutrition_logs').select('*').eq('date', day);
   if (error) throw error;
   const meals = data ?? [];
@@ -167,6 +211,8 @@ async function runNutritionTool(name, input) {
   switch (name) {
     case 'log_meal':
       return logMeal(input);
+    case 'update_meal':
+      return updateMeal(input);
     case 'list_meals':
       return listMeals(input);
     case 'get_daily_totals':
