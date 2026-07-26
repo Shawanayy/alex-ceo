@@ -19,8 +19,8 @@ and offer general grocery/meal suggestions when asked — not personalized medic
 Notes on the data:
 - "nutrition_logs" is one row per logged meal (not per day) — Shane can log breakfast, lunch, dinner, and \
 snacks separately for the same date, so log_meal always inserts a new row rather than upserting.
-- calories/protein/carbs/fat are all optional integers/numbers — capture whatever Shane gives you, leave the \
-rest blank rather than guessing a number.
+- calories/protein/carbs/fat/sugar are all optional integers/numbers — capture whatever Shane gives you, leave \
+the rest blank rather than guessing a number.
 - IMPORTANT — avoiding duplicate rows: each delegation from Alex is a fresh, memoryless request, so if Shane \
 first reports a meal (logged with some fields missing) and then, in a *separate* follow-up delegation, supplies \
 the missing calorie/macro numbers for that *same* meal, do NOT call log_meal again — that creates a second, \
@@ -55,6 +55,7 @@ const toolDefs = [
         protein: { type: 'integer', description: 'Grams of protein, if known' },
         carbs: { type: 'integer', description: 'Grams of carbs, if known' },
         fat: { type: 'number', description: 'Grams of fat, if known' },
+        sugar: { type: 'number', description: 'Grams of sugar, if known' },
         image_url: { type: 'string', description: 'Optional photo URL of the meal' },
       },
     },
@@ -74,6 +75,7 @@ const toolDefs = [
         protein: { type: 'integer', description: 'Grams of protein, if known' },
         carbs: { type: 'integer', description: 'Grams of carbs, if known' },
         fat: { type: 'number', description: 'Grams of fat, if known' },
+        sugar: { type: 'number', description: 'Grams of sugar, if known' },
         image_url: { type: 'string' },
       },
       required: ['id'],
@@ -109,13 +111,14 @@ const toolDefs = [
   },
 ];
 
-async function logMeal({ date, meal_name, calories, protein, carbs, fat, image_url }) {
+async function logMeal({ date, meal_name, calories, protein, carbs, fat, sugar, image_url }) {
   const row = { user_id: DEFAULT_USER_ID, date: date ?? (await todayLocal()) };
   if (meal_name !== undefined) row.meal_name = meal_name;
   if (calories !== undefined) row.calories = calories;
   if (protein !== undefined) row.protein = protein;
   if (carbs !== undefined) row.carbs = carbs;
   if (fat !== undefined) row.fat = fat;
+  if (sugar !== undefined) row.sugar = sugar;
   if (image_url !== undefined) row.image_url = image_url;
 
   const { data, error } = await supabase.from('nutrition_logs').insert(row).select().single();
@@ -123,7 +126,7 @@ async function logMeal({ date, meal_name, calories, protein, carbs, fat, image_u
   return { ok: true, meal: data };
 }
 
-async function updateMeal({ id, meal_name, calories, protein, carbs, fat, image_url }) {
+async function updateMeal({ id, meal_name, calories, protein, carbs, fat, sugar, image_url }) {
   if (!id) throw new Error('update_meal requires an id (use list_meals to find it)');
   const patch = {};
   if (meal_name !== undefined) patch.meal_name = meal_name;
@@ -131,6 +134,7 @@ async function updateMeal({ id, meal_name, calories, protein, carbs, fat, image_
   if (protein !== undefined) patch.protein = protein;
   if (carbs !== undefined) patch.carbs = carbs;
   if (fat !== undefined) patch.fat = fat;
+  if (sugar !== undefined) patch.sugar = sugar;
   if (image_url !== undefined) patch.image_url = image_url;
 
   const { data, error } = await supabase.from('nutrition_logs').update(patch).eq('id', id).select().single();
@@ -158,8 +162,9 @@ async function getDailyTotals({ date }) {
       protein: acc.protein + (m.protein ?? 0),
       carbs: acc.carbs + (m.carbs ?? 0),
       fat: acc.fat + Number(m.fat ?? 0),
+      sugar: acc.sugar + Number(m.sugar ?? 0),
     }),
-    { calories: 0, protein: 0, carbs: 0, fat: 0 }
+    { calories: 0, protein: 0, carbs: 0, fat: 0, sugar: 0 }
   );
   return { ok: true, date: day, meals_logged: meals.length, totals };
 }
@@ -180,7 +185,14 @@ async function getNutritionProgress() {
     const inWindow = meals.filter((m) => daysAgo(m.date) < windowDays);
     const daysLogged = new Set(inWindow.map((m) => m.date)).size;
     if (daysLogged === 0) {
-      return { days_logged: 0, avg_daily_calories: 0, avg_daily_protein: 0, avg_daily_carbs: 0, avg_daily_fat: 0 };
+      return {
+        days_logged: 0,
+        avg_daily_calories: 0,
+        avg_daily_protein: 0,
+        avg_daily_carbs: 0,
+        avg_daily_fat: 0,
+        avg_daily_sugar: 0,
+      };
     }
     const totals = inWindow.reduce(
       (acc, m) => ({
@@ -188,8 +200,9 @@ async function getNutritionProgress() {
         protein: acc.protein + (m.protein ?? 0),
         carbs: acc.carbs + (m.carbs ?? 0),
         fat: acc.fat + Number(m.fat ?? 0),
+        sugar: acc.sugar + Number(m.sugar ?? 0),
       }),
-      { calories: 0, protein: 0, carbs: 0, fat: 0 }
+      { calories: 0, protein: 0, carbs: 0, fat: 0, sugar: 0 }
     );
     return {
       days_logged: daysLogged,
@@ -197,6 +210,7 @@ async function getNutritionProgress() {
       avg_daily_protein: Math.round(totals.protein / daysLogged),
       avg_daily_carbs: Math.round(totals.carbs / daysLogged),
       avg_daily_fat: Math.round((totals.fat / daysLogged) * 10) / 10,
+      avg_daily_sugar: Math.round((totals.sugar / daysLogged) * 10) / 10,
     };
   }
 
