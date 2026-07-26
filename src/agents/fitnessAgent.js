@@ -3,6 +3,7 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 import { supabase } from '../supabaseClient.js';
+import { todayLocal } from '../utils/localDate.js';
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 const MODEL = process.env.ALEX_MODEL || 'claude-sonnet-5';
@@ -31,6 +32,11 @@ days, current consecutive-day streak, and a breakdown of workout_type frequency.
 (e.g. "you've logged legs 0 times in 3 weeks" is fine; a specific new program is not your call to make).
 - Shane may also have a "Hit 10,000 steps a day" or mileage-type habit/goal tracked separately by the Habit \
 Tracking Agent — that's a different system (dashboard goals), don't try to read or write it from here.
+- When Shane asks what his workout is for today (or "what should I do today" / "what's next"), call \
+get_todays_workout FIRST — it looks up the actual scheduled day (day_type + phase) from his structured \
+lifting program. If it returns workout data, report that plan back verbatim (day type and full exercise \
+list), don't guess, reconstruct, or infer it from logged history. Only fall back to reasoning from \
+list_workouts/get_workout_progress if get_todays_workout returns no data at all.
 
 Be concise and factual in your final answer — you're reporting back to another agent (Alex), not chatting \
 with Shane directly. Always include concrete numbers (dates, counts, streaks) rather than vague summaries.`;
@@ -68,10 +74,18 @@ const toolDefs = [
       'streak, and workout_type breakdown. Use this for "how am I doing" / progress / plan-adjustment questions.',
     input_schema: { type: 'object', properties: {} },
   },
+  {
+    name: 'get_todays_workout',
+    description:
+      "Look up today's scheduled workout from Shane's structured lifting program (day type + phase + full " +
+      'exercise list). Use this whenever Shane asks what his workout is for today or what he should do next — ' +
+      'report the result verbatim rather than guessing from logged history.',
+    input_schema: { type: 'object', properties: {} },
+  },
 ];
 
 async function logWorkout({ date, workout_type, notes, completed }) {
-  const row = { user_id: DEFAULT_USER_ID, date: date ?? new Date().toISOString().slice(0, 10) };
+  const row = { user_id: DEFAULT_USER_ID, date: date ?? (await todayLocal()) };
   if (workout_type !== undefined) row.workout_type = workout_type;
   if (notes !== undefined) row.notes = notes;
   if (completed !== undefined) row.completed = completed;
@@ -137,6 +151,12 @@ async function getWorkoutProgress() {
   };
 }
 
+async function getTodaysWorkout() {
+  const { data, error } = await supabase.rpc('get_todays_workout');
+  if (error) throw error;
+  return { ok: true, ...data };
+}
+
 async function runFitnessTool(name, input) {
   switch (name) {
     case 'log_workout':
@@ -145,6 +165,8 @@ async function runFitnessTool(name, input) {
       return listWorkouts(input);
     case 'get_workout_progress':
       return getWorkoutProgress();
+    case 'get_todays_workout':
+      return getTodaysWorkout();
     default:
       throw new Error(`Unknown Fitness Coach tool: ${name}`);
   }
