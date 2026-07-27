@@ -7,6 +7,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import dotenv from 'dotenv';
 import TelegramBot from 'node-telegram-bot-api';
+import { supabase } from './supabaseClient.js';
 
 dotenv.config();
 
@@ -16,28 +17,46 @@ const GROUP_A = ['FSLR', 'IONQ'];
 const GROUP_B = ['NVDA', 'QQQ', 'SPY', 'MU'];
 const THRESHOLD = 0.175; // 17.5% — exact trigger per spec
 
-const STATE_PATH = path.join(process.cwd(), 'data', 'priceAlertState.json');
 const LOG_PATH = path.join(process.cwd(), 'logs', 'priceAlertMonitor.log');
 const YAHOO_QUOTE_URL = 'https://query1.finance.yahoo.com/v7/finance/quote';
 
 function log(line) {
   const stamped = `[${new Date().toISOString()}] ${line}`;
   console.log(stamped);
-  fs.mkdirSync(path.dirname(LOG_PATH), { recursive: true });
-  fs.appendFileSync(LOG_PATH, stamped + '\n');
-}
-
-function loadState() {
+  // Best-effort local file log for manual runs. Render Cron Jobs get a fresh ephemeral
+  // container each run (this file won't persist there) — Render's own captured stdout is
+  // the durable log in production; this is just a convenience for running locally.
   try {
-    return JSON.parse(fs.readFileSync(STATE_PATH, 'utf8'));
+    fs.mkdirSync(path.dirname(LOG_PATH), { recursive: true });
+    fs.appendFileSync(LOG_PATH, stamped + '\n');
   } catch {
-    return {};
+    // ignore — e.g. read-only filesystem
   }
 }
 
-function saveState(state) {
-  fs.mkdirSync(path.dirname(STATE_PATH), { recursive: true });
-  fs.writeFileSync(STATE_PATH, JSON.stringify(state, null, 2));
+// State (high-water marks, anti-spam crossing flags) lives in Supabase, not a local file —
+// Render Cron Jobs run in a fresh ephemeral container each time, so anything written to disk
+// is gone by the next hourly check.
+async function loadState() {
+  const { data, error } = await supabase.from('price_alert_state').select('*');
+  if (error) throw error;
+  const state = {};
+  for (const row of data ?? []) {
+    state[row.ticker] = { highWaterMark: row.high_water_mark, crossed: row.crossed };
+  }
+  return state;
+}
+
+async function saveState(state) {
+  const rows = Object.entries(state).map(([ticker, s]) => ({
+    ticker,
+    high_water_mark: s.highWaterMark ?? null,
+    crossed: s.crossed ?? false,
+    updated_at: new Date().toISOString(),
+  }));
+  if (rows.length === 0) return;
+  const { error } = await supabase.from('price_alert_state').upsert(rows, { onConflict: 'ticker' });
+  if (error) throw error;
 }
 
 // Mon-Fri 9:30am-4:00pm America/New_York, computed from wall-clock ET regardless of the host's
@@ -143,7 +162,7 @@ export async function runCheck({ force = false } = {}) {
     return { ok: false, error: err.message };
   }
 
-  const state = loadState();
+  const state = await loadState();
   const bot = new TelegramBot(token);
   const alertsSent = [];
 
@@ -178,7 +197,7 @@ export async function runCheck({ force = false } = {}) {
     }
   }
 
-  saveState(state);
+  await saveState(state);
   log(`Check complete. ${alertsSent.length} alert(s) sent.`);
   return { ok: true, alertsSent };
 }
