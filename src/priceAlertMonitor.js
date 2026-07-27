@@ -138,6 +138,20 @@ async function fetchOneQuote(ticker, apiKey) {
   };
 }
 
+// Sanity guard against bad upstream data (e.g. a field/symbol mix-up in an API response) getting
+// written into Supabase as a "real" high-water mark or 52-week low and then driving a false
+// alert — e.g. Finnhub once returned a $1255 value for MU (Micron), which is not a plausible
+// price for that ticker at any point in its real trading history. This only rejects data whose
+// price and 52-week reference point are wildly inconsistent (>10x apart) — a real 52-week
+// pullback/rise, even a large one, stays well inside that band; this is a corruption filter, not
+// a market-move filter.
+function isPlausibleQuote(quote, referencePrice) {
+  if (!Number.isFinite(quote.price) || quote.price <= 0) return false;
+  if (!Number.isFinite(referencePrice) || referencePrice <= 0) return false;
+  const ratio = quote.price / referencePrice;
+  return ratio >= 0.1 && ratio <= 10;
+}
+
 async function fetchQuotes(tickers, apiKey) {
   const byTicker = {};
   for (const ticker of tickers) {
@@ -227,6 +241,10 @@ export async function runCheck({ force = false } = {}) {
       log(`Checked ${ticker}: no usable price/52-week data from Finnhub, skipping.`);
       continue;
     }
+    if (!isPlausibleQuote(quote, quote.week52Low)) {
+      log(`ERROR: implausible data for ${ticker} (price=$${quote.price} 52w_low=$${quote.week52Low}) — skipping, not updating state.`);
+      continue;
+    }
     log(`Checked ${ticker}: price=$${quote.price} 52w_low=$${quote.week52Low}`);
     const message = evaluateGroupA(ticker, quote, state);
     if (message) {
@@ -241,6 +259,10 @@ export async function runCheck({ force = false } = {}) {
     const quote = quotes[ticker];
     if (!quote || quote.price == null || quote.week52High == null) {
       log(`Checked ${ticker}: no usable price/52-week data from Finnhub, skipping.`);
+      continue;
+    }
+    if (!isPlausibleQuote(quote, quote.week52High)) {
+      log(`ERROR: implausible data for ${ticker} (price=$${quote.price} 52w_high=$${quote.week52High}) — skipping, not updating state.`);
       continue;
     }
     const hwmBefore = state[ticker]?.highWaterMark ?? quote.week52High;
