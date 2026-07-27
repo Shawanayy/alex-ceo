@@ -56,7 +56,7 @@ function log(line) {
 
 // State (high-water marks, anti-spam crossing flags) lives in Supabase, not a local file —
 // Render Cron Jobs run in a fresh ephemeral container each time, so anything written to disk
-// is gone by the next hourly check.
+// is gone by the next scheduled check.
 async function loadState() {
   const { data, error } = await supabase.from('price_alert_state').select('*');
   if (error) {
@@ -87,9 +87,9 @@ async function saveState(state) {
   log(`Supabase write OK: upserted ${rows.length} row(s) to price_alert_state.`);
 }
 
-// Mon-Fri 9:30am-4:00pm America/New_York, computed from wall-clock ET regardless of the host's
-// own timezone or daylight saving — no hardcoded UTC offset that would drift with DST.
-export function isMarketHoursET(date = new Date()) {
+// Shared wall-clock-ET reader (no hardcoded UTC offset, so it doesn't drift with DST) used by
+// both the market-hours gate and the twice-a-day schedule-window gate below.
+function getEasternTimeParts(date) {
   const parts = new Intl.DateTimeFormat('en-US', {
     timeZone: 'America/New_York',
     weekday: 'short',
@@ -102,18 +102,41 @@ export function isMarketHoursET(date = new Date()) {
       acc[p.type] = p.value;
       return acc;
     }, {});
-
-  if (parts.weekday === 'Sat' || parts.weekday === 'Sun') return false;
   const hour = parts.hour === '24' ? 0 : Number(parts.hour);
-  const minutes = hour * 60 + Number(parts.minute);
-  return minutes >= 9 * 60 + 30 && minutes <= 16 * 60;
+  return { weekday: parts.weekday, minutesSinceMidnight: hour * 60 + Number(parts.minute) };
+}
+
+// Mon-Fri 9:30am-4:00pm America/New_York.
+export function isMarketHoursET(date = new Date()) {
+  const { weekday, minutesSinceMidnight } = getEasternTimeParts(date);
+  if (weekday === 'Sat' || weekday === 'Sun') return false;
+  return minutesSinceMidnight >= 9 * 60 + 30 && minutesSinceMidnight <= 16 * 60;
+}
+
+// Twice a day, not hourly: once shortly after market open and once shortly before close.
+// Render Cron Jobs schedules are UTC-only (no timezone-aware option), so the ET target times
+// below are converted to UTC for BOTH DST regimes in render.yaml's cron config (one entry per
+// possible offset) rather than needing a manual cron edit every DST changeover — whichever of
+// those UTC fire times is currently wrong for the season lands ~60 minutes away from its ET
+// target and gets skipped here, cleanly, via the tolerance window.
+const SCHEDULED_CHECK_TIMES_ET = [
+  { hour: 10, minute: 0, label: '~10:00am ET (near market open)' },
+  { hour: 15, minute: 30, label: '~3:30pm ET (near market close)' },
+];
+const SCHEDULE_TOLERANCE_MINUTES = 20;
+
+export function isNearScheduledCheckTimeET(date = new Date(), toleranceMinutes = SCHEDULE_TOLERANCE_MINUTES) {
+  const { minutesSinceMidnight } = getEasternTimeParts(date);
+  return SCHEDULED_CHECK_TIMES_ET.some(
+    (t) => Math.abs(minutesSinceMidnight - (t.hour * 60 + t.minute)) <= toleranceMinutes
+  );
 }
 
 // Finnhub's free tier: /quote for live price, /stock/metric for 52-week high/low. Switched from
 // Yahoo Finance's unofficial endpoint after Render's server-side requests started getting HTTP 401
 // there (Yahoo blocking non-browser traffic) — rather than fight that with header tricks, Finnhub
 // is a real supported free API (signup at finnhub.io/register, no brokerage account, 60 req/min on
-// the free tier — plenty for 2 calls x 6 tickers once an hour).
+// the free tier — plenty for 2 calls x 6 tickers, twice a day).
 //
 // Known risk, unconfirmed without a live test: /stock/metric is a fundamentals endpoint and may
 // not return populated 52WeekHigh/52WeekLow for ETF tickers (QQQ, SPY) the way it does for real
@@ -139,38 +162,33 @@ async function fetchOneQuote(ticker, apiKey) {
   };
 }
 
-// Confirmed-bad values observed on live runs: Finnhub's /stock/metric returned this EXACT same
-// 52-week-high for MU (Micron) on two separate runs 8 hours apart (2026-07-27 09:02 and 17:35
-// UTC) — deterministic, not transient noise, and not a plausible price for MU at any point in
-// its real trading history. Hard-blocked here since it was proven to slide past the ratio check
-// below (whatever MU's live price was, it apparently landed within 10x of 1255). Remove once a
-// live run confirms Finnhub is returning a different, correct value for MU.
-const KNOWN_BAD_52WEEK_VALUES = {
-  MU: [1255],
-};
-
-// Sanity guard against bad upstream data (e.g. a field/symbol mix-up, or a bad data point on
-// Finnhub's side) getting written into Supabase as a "real" high-water mark or 52-week low and
-// then driving a false alert. Two independent checks, both against the *current* live quote
-// (from /quote) rather than trusting the /stock/metric fundamentals response on its own:
-//   1. Live price vs. the 52-week reference point must be within 10x of each other.
-//   2. Previous close (a second, separately-fetched field, not derived from the same metrics
-//      call) must be within a tighter 5x band of the reference point — a real 52-week extreme
-//      shouldn't be wildly divorced from where the stock actually closed yesterday.
-// A real 52-week pullback/rise, even a large one, stays well inside both bands for these
-// tickers — this is a corruption filter, not a market-move filter.
+// NOTE on history: an earlier version of this guard hard-blocked a specific $1255 value seen for
+// MU (Micron) after it showed up identically on two runs, on the assumption that identical values
+// meant corrupted/stuck data. That assumption was wrong — Micron had a genuine, very large 2026
+// rally (crossed a $1T market cap in May 2026 on AI/HBM demand) with a real intraday high of
+// $1255 on 2026-06-25, since pulled back to the $880-950 range. Identical repeated values just
+// meant Finnhub was correctly reporting an unchanging 52-week high, not that it was stuck/broken.
+// The hard block has been removed — do not reintroduce a hard-coded value block for a specific
+// ticker/number without independently confirming (outside this data source) that the number is
+// actually wrong, since a real, large, ticker-specific move can look identical to bad data from
+// inside this check alone.
+//
+// Sanity guard against bad upstream data (e.g. a field/symbol mix-up in an API response) getting
+// written into Supabase as a "real" high-water mark or 52-week low and then driving a false
+// alert. Deliberately wide bands — 100x, not 10x — since a handful of these tickers (small/mid-cap
+// or AI-demand-driven names like IONQ, FSLR, MU) can have genuinely large real moves within a
+// year; this is meant to catch gross corruption (wrong symbol, wrong field, wrong units), not to
+// second-guess a real, if extreme, market move.
 function isPlausibleQuote(ticker, quote, referencePrice) {
   if (!Number.isFinite(quote.price) || quote.price <= 0) return false;
   if (!Number.isFinite(referencePrice) || referencePrice <= 0) return false;
 
-  if (KNOWN_BAD_52WEEK_VALUES[ticker]?.includes(referencePrice)) return false;
-
   const priceRatio = quote.price / referencePrice;
-  if (priceRatio < 0.1 || priceRatio > 10) return false;
+  if (priceRatio < 0.01 || priceRatio > 100) return false;
 
   if (Number.isFinite(quote.previousClose) && quote.previousClose > 0) {
     const previousCloseRatio = quote.previousClose / referencePrice;
-    if (previousCloseRatio < 0.2 || previousCloseRatio > 5) return false;
+    if (previousCloseRatio < 0.01 || previousCloseRatio > 100) return false;
   }
 
   return true;
@@ -233,6 +251,11 @@ export async function runCheck({ force = false } = {}) {
 
   if (!marketHoursBypassed && !isMarketHoursET(now)) {
     log('Skipped check — outside market hours (Mon-Fri 9:30am-4:00pm ET).');
+    return { ok: true, skipped: true };
+  }
+
+  if (!marketHoursBypassed && !isNearScheduledCheckTimeET(now)) {
+    log('Skipped check — within market hours but not near a scheduled check time (~10:00am or ~3:30pm ET).');
     return { ok: true, skipped: true };
   }
 
