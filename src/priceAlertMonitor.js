@@ -37,7 +37,8 @@ const GROUP_B = ['NVDA', 'QQQ', 'SPY', 'MU'];
 const THRESHOLD = 0.175; // 17.5% — exact trigger per spec
 
 const LOG_PATH = path.join(process.cwd(), 'logs', 'priceAlertMonitor.log');
-const YAHOO_QUOTE_URL = 'https://query1.finance.yahoo.com/v7/finance/quote';
+const FINNHUB_QUOTE_URL = 'https://finnhub.io/api/v1/quote';
+const FINNHUB_METRIC_URL = 'https://finnhub.io/api/v1/stock/metric';
 
 function log(line) {
   const stamped = `[${new Date().toISOString()}] ${line}`;
@@ -108,23 +109,43 @@ export function isMarketHoursET(date = new Date()) {
   return minutes >= 9 * 60 + 30 && minutes <= 16 * 60;
 }
 
-// Yahoo Finance's unauthenticated quote endpoint — one batched request for all tickers, no API
-// key, no daily cap, and it returns regularMarketPrice + fiftyTwoWeekHigh/Low in the same payload
-// (unlike Alpha Vantage, whose free tier caps at 25 req/day, nowhere near enough for hourly
-// checks across 6 tickers plus the fundamentals lookups 52-week data needs there).
-async function fetchQuotes(tickers) {
-  const url = `${YAHOO_QUOTE_URL}?symbols=${tickers.join(',')}`;
-  const res = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
-  if (!res.ok) throw new Error(`Yahoo Finance HTTP ${res.status}`);
-  const json = await res.json();
-  const results = json?.quoteResponse?.result ?? [];
+// Finnhub's free tier: /quote for live price, /stock/metric for 52-week high/low. Switched from
+// Yahoo Finance's unofficial endpoint after Render's server-side requests started getting HTTP 401
+// there (Yahoo blocking non-browser traffic) — rather than fight that with header tricks, Finnhub
+// is a real supported free API (signup at finnhub.io/register, no brokerage account, 60 req/min on
+// the free tier — plenty for 2 calls x 6 tickers once an hour).
+//
+// Known risk, unconfirmed without a live test: /stock/metric is a fundamentals endpoint and may
+// not return populated 52WeekHigh/52WeekLow for ETF tickers (QQQ, SPY) the way it does for real
+// stocks (FSLR, IONQ, NVDA, MU). Each ticker is fetched independently and a missing/incomplete
+// result just logs and skips that ticker for this check (see runCheck) rather than aborting the
+// whole run — watch the first live run's logs for "no 52-week data" on QQQ/SPY specifically.
+async function fetchOneQuote(ticker, apiKey) {
+  const [quoteRes, metricRes] = await Promise.all([
+    fetch(`${FINNHUB_QUOTE_URL}?symbol=${ticker}&token=${apiKey}`),
+    fetch(`${FINNHUB_METRIC_URL}?symbol=${ticker}&metric=all&token=${apiKey}`),
+  ]);
+  if (!quoteRes.ok) throw new Error(`Finnhub /quote HTTP ${quoteRes.status}`);
+  if (!metricRes.ok) throw new Error(`Finnhub /stock/metric HTTP ${metricRes.status}`);
+
+  const quoteJson = await quoteRes.json();
+  const metricJson = await metricRes.json();
+
+  return {
+    price: quoteJson?.c ?? null,
+    week52High: metricJson?.metric?.['52WeekHigh'] ?? null,
+    week52Low: metricJson?.metric?.['52WeekLow'] ?? null,
+  };
+}
+
+async function fetchQuotes(tickers, apiKey) {
   const byTicker = {};
-  for (const r of results) {
-    byTicker[r.symbol] = {
-      price: r.regularMarketPrice,
-      week52High: r.fiftyTwoWeekHigh,
-      week52Low: r.fiftyTwoWeekLow,
-    };
+  for (const ticker of tickers) {
+    try {
+      byTicker[ticker] = await fetchOneQuote(ticker, apiKey);
+    } catch (err) {
+      log(`ERROR fetching Finnhub data for ${ticker}: ${err.message}`);
+    }
   }
   return byTicker;
 }
@@ -184,14 +205,17 @@ export async function runCheck({ force = false } = {}) {
     return { ok: false, error: 'Missing Telegram config' };
   }
 
-  const allTickers = [...GROUP_A, ...GROUP_B];
-  let quotes;
-  try {
-    quotes = await fetchQuotes(allTickers);
-  } catch (err) {
-    log(`ERROR fetching quotes: ${err.message}`);
-    return { ok: false, error: err.message };
+  const finnhubApiKey = process.env.FINNHUB_API_KEY;
+  if (!finnhubApiKey) {
+    log('ERROR: missing FINNHUB_API_KEY — cannot fetch price data.');
+    return { ok: false, error: 'Missing Finnhub config' };
   }
+
+  const allTickers = [...GROUP_A, ...GROUP_B];
+  // fetchQuotes fetches each ticker independently and never throws — a bad/missing response for
+  // one ticker (e.g. an ETF with no 52-week fundamentals) is logged and that ticker is skipped
+  // below, rather than aborting the whole check.
+  const quotes = await fetchQuotes(allTickers, finnhubApiKey);
 
   const state = await loadState();
   const bot = new TelegramBot(token);
@@ -200,7 +224,7 @@ export async function runCheck({ force = false } = {}) {
   for (const ticker of GROUP_A) {
     const quote = quotes[ticker];
     if (!quote || quote.price == null || quote.week52Low == null) {
-      log(`Checked ${ticker}: no data returned from Yahoo Finance, skipping.`);
+      log(`Checked ${ticker}: no usable price/52-week data from Finnhub, skipping.`);
       continue;
     }
     log(`Checked ${ticker}: price=$${quote.price} 52w_low=$${quote.week52Low}`);
@@ -216,7 +240,7 @@ export async function runCheck({ force = false } = {}) {
   for (const ticker of GROUP_B) {
     const quote = quotes[ticker];
     if (!quote || quote.price == null || quote.week52High == null) {
-      log(`Checked ${ticker}: no data returned from Yahoo Finance, skipping.`);
+      log(`Checked ${ticker}: no usable price/52-week data from Finnhub, skipping.`);
       continue;
     }
     const hwmBefore = state[ticker]?.highWaterMark ?? quote.week52High;

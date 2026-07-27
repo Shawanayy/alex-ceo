@@ -130,3 +130,5 @@ services:
         sync: false
       - key: SUPABASE_SERVICE_ROLE_KEY
         sync: false
+      - key: FINNHUB_API_KEY
+        sync: false
