@@ -11,6 +11,25 @@ import { supabase } from './supabaseClient.js';
 
 dotenv.config();
 
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// TEMPORARY DEBUG BYPASSES — for the one-time manual end-to-end verification run only.
+// Do NOT leave these env vars set in Render once verification is done; see README note at the
+// bottom of this file / the setup summary for the removal steps. Neither var does anything
+// unless explicitly set, so leaving this code in place (with the vars unset) is inert.
+//
+//   FORCE_RUN=true            — skip the market-hours gate so the check runs regardless of time.
+//                                Does NOT change isMarketHoursET() itself, just whether runCheck
+//                                honors it.
+//   FORCE_ALERT_TICKER=<TICK> — after the real check completes, send one additional synthetic
+//                                Telegram message for <TICK>, clearly labeled as a debug test,
+//                                to prove the Telegram send path works. This does NOT touch that
+//                                ticker's real Supabase state (high-water mark / crossed flag) —
+//                                it's purely a delivery test, so it can't desync real anti-spam
+//                                tracking.
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+const DEBUG_FORCE_RUN = process.env.FORCE_RUN === 'true';
+const DEBUG_FORCE_ALERT_TICKER = process.env.FORCE_ALERT_TICKER || null;
+
 // Group A: already-down positions — alert on further downside toward/through the 52-week low.
 const GROUP_A = ['FSLR', 'IONQ'];
 // Group B: winners off their highs — alert on pullback from a rolling high-water mark.
@@ -39,7 +58,11 @@ function log(line) {
 // is gone by the next hourly check.
 async function loadState() {
   const { data, error } = await supabase.from('price_alert_state').select('*');
-  if (error) throw error;
+  if (error) {
+    log(`ERROR reading price_alert_state from Supabase: ${error.message}`);
+    throw error;
+  }
+  log(`Supabase read OK: loaded ${data?.length ?? 0} row(s) from price_alert_state.`);
   const state = {};
   for (const row of data ?? []) {
     state[row.ticker] = { highWaterMark: row.high_water_mark, crossed: row.crossed };
@@ -56,7 +79,11 @@ async function saveState(state) {
   }));
   if (rows.length === 0) return;
   const { error } = await supabase.from('price_alert_state').upsert(rows, { onConflict: 'ticker' });
-  if (error) throw error;
+  if (error) {
+    log(`ERROR writing price_alert_state to Supabase: ${error.message}`);
+    throw error;
+  }
+  log(`Supabase write OK: upserted ${rows.length} row(s) to price_alert_state.`);
 }
 
 // Mon-Fri 9:30am-4:00pm America/New_York, computed from wall-clock ET regardless of the host's
@@ -141,7 +168,11 @@ export function evaluateGroupB(ticker, quote, state) {
 
 export async function runCheck({ force = false } = {}) {
   const now = new Date();
-  if (!force && !isMarketHoursET(now)) {
+  const marketHoursBypassed = force || DEBUG_FORCE_RUN;
+  if (DEBUG_FORCE_RUN) log('DEBUG: FORCE_RUN=true — bypassing market-hours gate (real gate logic untouched).');
+  if (DEBUG_FORCE_ALERT_TICKER) log(`DEBUG: FORCE_ALERT_TICKER=${DEBUG_FORCE_ALERT_TICKER} — will send one synthetic test alert this run.`);
+
+  if (!marketHoursBypassed && !isMarketHoursET(now)) {
     log('Skipped check — outside market hours (Mon-Fri 9:30am-4:00pm ET).');
     return { ok: true, skipped: true };
   }
@@ -175,8 +206,9 @@ export async function runCheck({ force = false } = {}) {
     log(`Checked ${ticker}: price=$${quote.price} 52w_low=$${quote.week52Low}`);
     const message = evaluateGroupA(ticker, quote, state);
     if (message) {
-      await bot.sendMessage(chatId, `Price alert — ${message}`);
+      const telegramResponse = await bot.sendMessage(chatId, `Price alert — ${message}`);
       log(`ALERT sent for ${ticker}: ${message}`);
+      log(`Telegram sendMessage response for ${ticker}: ${JSON.stringify(telegramResponse)}`);
       alertsSent.push(message);
     }
   }
@@ -191,13 +223,31 @@ export async function runCheck({ force = false } = {}) {
     log(`Checked ${ticker}: price=$${quote.price} 52w_high=$${quote.week52High} hwm=$${hwmBefore}`);
     const message = evaluateGroupB(ticker, quote, state);
     if (message) {
-      await bot.sendMessage(chatId, `Price alert — ${message}`);
+      const telegramResponse = await bot.sendMessage(chatId, `Price alert — ${message}`);
       log(`ALERT sent for ${ticker}: ${message}`);
+      log(`Telegram sendMessage response for ${ticker}: ${JSON.stringify(telegramResponse)}`);
       alertsSent.push(message);
     }
   }
 
   await saveState(state);
+
+  // DEBUG: synthetic test alert for FORCE_ALERT_TICKER, sent after the real state save so it
+  // can never affect (or be affected by) real anti-spam/high-water-mark tracking. Only runs if
+  // the env var is set — inert otherwise.
+  if (DEBUG_FORCE_ALERT_TICKER) {
+    const debugMessage =
+      `[DEBUG TEST — NOT A REAL THRESHOLD CROSSING] ${DEBUG_FORCE_ALERT_TICKER}: synthetic alert ` +
+      `sent via FORCE_ALERT_TICKER to verify the Telegram delivery path end-to-end.`;
+    try {
+      const telegramResponse = await bot.sendMessage(chatId, `Price alert — ${debugMessage}`);
+      log(`DEBUG: Telegram sendMessage response: ${JSON.stringify(telegramResponse)}`);
+      alertsSent.push(debugMessage);
+    } catch (err) {
+      log(`DEBUG: Telegram sendMessage FAILED: ${err.message}`);
+    }
+  }
+
   log(`Check complete. ${alertsSent.length} alert(s) sent.`);
   return { ok: true, alertsSent };
 }
