@@ -1,0 +1,356 @@
+// Standalone, read-only stock price monitor. Notify-only: it never places trades, never touches
+// Robinhood/Plaid, and doesn't know Shane's cost basis — it only compares live prices against
+// public 52-week high/low data and messages Telegram when a threshold is crossed. Runs on a
+// schedule (see the Routine set up alongside this file) rather than inside the interactive
+// Alex conversation loop, so it needs its own entrypoint and its own on-disk state.
+import fs from 'node:fs';
+import path from 'node:path';
+import dotenv from 'dotenv';
+import TelegramBot from 'node-telegram-bot-api';
+import { supabase } from './supabaseClient.js';
+
+dotenv.config();
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// TEMPORARY DEBUG BYPASSES — for the one-time manual end-to-end verification run only.
+// Do NOT leave these env vars set in Render once verification is done; see README note at the
+// bottom of this file / the setup summary for the removal steps. Neither var does anything
+// unless explicitly set, so leaving this code in place (with the vars unset) is inert.
+//
+//   FORCE_RUN=true            — skip the market-hours gate so the check runs regardless of time.
+//                                Does NOT change isMarketHoursET() itself, just whether runCheck
+//                                honors it.
+//   FORCE_ALERT_TICKER=<TICK> — after the real check completes, send one additional synthetic
+//                                Telegram message for <TICK>, clearly labeled as a debug test,
+//                                to prove the Telegram send path works. This does NOT touch that
+//                                ticker's real Supabase state (high-water mark / crossed flag) —
+//                                it's purely a delivery test, so it can't desync real anti-spam
+//                                tracking.
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+const DEBUG_FORCE_RUN = process.env.FORCE_RUN === 'true';
+const DEBUG_FORCE_ALERT_TICKER = process.env.FORCE_ALERT_TICKER || null;
+
+// Group A: already-down positions — alert on further downside toward/through the 52-week low.
+const GROUP_A = ['FSLR', 'IONQ'];
+// Group B: winners off their highs — alert on pullback from a rolling high-water mark.
+const GROUP_B = ['NVDA', 'QQQ', 'SPY', 'MU'];
+const THRESHOLD = 0.175; // 17.5% — exact trigger per spec
+
+const LOG_PATH = path.join(process.cwd(), 'logs', 'priceAlertMonitor.log');
+const FINNHUB_QUOTE_URL = 'https://finnhub.io/api/v1/quote';
+const FINNHUB_METRIC_URL = 'https://finnhub.io/api/v1/stock/metric';
+
+function log(line) {
+  const stamped = `[${new Date().toISOString()}] ${line}`;
+  console.log(stamped);
+  // Best-effort local file log for manual runs. Render Cron Jobs get a fresh ephemeral
+  // container each run (this file won't persist there) — Render's own captured stdout is
+  // the durable log in production; this is just a convenience for running locally.
+  try {
+    fs.mkdirSync(path.dirname(LOG_PATH), { recursive: true });
+    fs.appendFileSync(LOG_PATH, stamped + '\n');
+  } catch {
+    // ignore — e.g. read-only filesystem
+  }
+}
+
+// State (high-water marks, anti-spam crossing flags) lives in Supabase, not a local file —
+// Render Cron Jobs run in a fresh ephemeral container each time, so anything written to disk
+// is gone by the next scheduled check.
+async function loadState() {
+  const { data, error } = await supabase.from('price_alert_state').select('*');
+  if (error) {
+    log(`ERROR reading price_alert_state from Supabase: ${error.message}`);
+    throw error;
+  }
+  log(`Supabase read OK: loaded ${data?.length ?? 0} row(s) from price_alert_state.`);
+  const state = {};
+  for (const row of data ?? []) {
+    state[row.ticker] = { highWaterMark: row.high_water_mark, crossed: row.crossed };
+  }
+  return state;
+}
+
+async function saveState(state) {
+  const rows = Object.entries(state).map(([ticker, s]) => ({
+    ticker,
+    high_water_mark: s.highWaterMark ?? null,
+    crossed: s.crossed ?? false,
+    updated_at: new Date().toISOString(),
+  }));
+  if (rows.length === 0) return;
+  const { error } = await supabase.from('price_alert_state').upsert(rows, { onConflict: 'ticker' });
+  if (error) {
+    log(`ERROR writing price_alert_state to Supabase: ${error.message}`);
+    throw error;
+  }
+  log(`Supabase write OK: upserted ${rows.length} row(s) to price_alert_state.`);
+}
+
+// Shared wall-clock-ET reader (no hardcoded UTC offset, so it doesn't drift with DST) used by
+// both the market-hours gate and the twice-a-day schedule-window gate below.
+function getEasternTimeParts(date) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York',
+    weekday: 'short',
+    hour: 'numeric',
+    minute: 'numeric',
+    hour12: false,
+  })
+    .formatToParts(date)
+    .reduce((acc, p) => {
+      acc[p.type] = p.value;
+      return acc;
+    }, {});
+  const hour = parts.hour === '24' ? 0 : Number(parts.hour);
+  return { weekday: parts.weekday, minutesSinceMidnight: hour * 60 + Number(parts.minute) };
+}
+
+// Mon-Fri 9:30am-4:00pm America/New_York.
+export function isMarketHoursET(date = new Date()) {
+  const { weekday, minutesSinceMidnight } = getEasternTimeParts(date);
+  if (weekday === 'Sat' || weekday === 'Sun') return false;
+  return minutesSinceMidnight >= 9 * 60 + 30 && minutesSinceMidnight <= 16 * 60;
+}
+
+// Twice a day, not hourly: once shortly after market open and once shortly before close.
+// Render Cron Jobs schedules are UTC-only (no timezone-aware option), so the ET target times
+// below are converted to UTC for BOTH DST regimes in render.yaml's cron config (one entry per
+// possible offset) rather than needing a manual cron edit every DST changeover — whichever of
+// those UTC fire times is currently wrong for the season lands ~60 minutes away from its ET
+// target and gets skipped here, cleanly, via the tolerance window.
+const SCHEDULED_CHECK_TIMES_ET = [
+  { hour: 10, minute: 0, label: '~10:00am ET (near market open)' },
+  { hour: 15, minute: 30, label: '~3:30pm ET (near market close)' },
+];
+const SCHEDULE_TOLERANCE_MINUTES = 20;
+
+export function isNearScheduledCheckTimeET(date = new Date(), toleranceMinutes = SCHEDULE_TOLERANCE_MINUTES) {
+  const { minutesSinceMidnight } = getEasternTimeParts(date);
+  return SCHEDULED_CHECK_TIMES_ET.some(
+    (t) => Math.abs(minutesSinceMidnight - (t.hour * 60 + t.minute)) <= toleranceMinutes
+  );
+}
+
+// Finnhub's free tier: /quote for live price, /stock/metric for 52-week high/low. Switched from
+// Yahoo Finance's unofficial endpoint after Render's server-side requests started getting HTTP 401
+// there (Yahoo blocking non-browser traffic) — rather than fight that with header tricks, Finnhub
+// is a real supported free API (signup at finnhub.io/register, no brokerage account, 60 req/min on
+// the free tier — plenty for 2 calls x 6 tickers, twice a day).
+//
+// Known risk, unconfirmed without a live test: /stock/metric is a fundamentals endpoint and may
+// not return populated 52WeekHigh/52WeekLow for ETF tickers (QQQ, SPY) the way it does for real
+// stocks (FSLR, IONQ, NVDA, MU). Each ticker is fetched independently and a missing/incomplete
+// result just logs and skips that ticker for this check (see runCheck) rather than aborting the
+// whole run — watch the first live run's logs for "no 52-week data" on QQQ/SPY specifically.
+async function fetchOneQuote(ticker, apiKey) {
+  const [quoteRes, metricRes] = await Promise.all([
+    fetch(`${FINNHUB_QUOTE_URL}?symbol=${ticker}&token=${apiKey}`),
+    fetch(`${FINNHUB_METRIC_URL}?symbol=${ticker}&metric=all&token=${apiKey}`),
+  ]);
+  if (!quoteRes.ok) throw new Error(`Finnhub /quote HTTP ${quoteRes.status}`);
+  if (!metricRes.ok) throw new Error(`Finnhub /stock/metric HTTP ${metricRes.status}`);
+
+  const quoteJson = await quoteRes.json();
+  const metricJson = await metricRes.json();
+
+  return {
+    price: quoteJson?.c ?? null,
+    previousClose: quoteJson?.pc ?? null,
+    week52High: metricJson?.metric?.['52WeekHigh'] ?? null,
+    week52Low: metricJson?.metric?.['52WeekLow'] ?? null,
+  };
+}
+
+// NOTE on history: an earlier version of this guard hard-blocked a specific $1255 value seen for
+// MU (Micron) after it showed up identically on two runs, on the assumption that identical values
+// meant corrupted/stuck data. That assumption was wrong — Micron had a genuine, very large 2026
+// rally (crossed a $1T market cap in May 2026 on AI/HBM demand) with a real intraday high of
+// $1255 on 2026-06-25, since pulled back to the $880-950 range. Identical repeated values just
+// meant Finnhub was correctly reporting an unchanging 52-week high, not that it was stuck/broken.
+// The hard block has been removed — do not reintroduce a hard-coded value block for a specific
+// ticker/number without independently confirming (outside this data source) that the number is
+// actually wrong, since a real, large, ticker-specific move can look identical to bad data from
+// inside this check alone.
+//
+// Sanity guard against bad upstream data (e.g. a field/symbol mix-up in an API response) getting
+// written into Supabase as a "real" high-water mark or 52-week low and then driving a false
+// alert. Deliberately wide bands — 100x, not 10x — since a handful of these tickers (small/mid-cap
+// or AI-demand-driven names like IONQ, FSLR, MU) can have genuinely large real moves within a
+// year; this is meant to catch gross corruption (wrong symbol, wrong field, wrong units), not to
+// second-guess a real, if extreme, market move.
+function isPlausibleQuote(ticker, quote, referencePrice) {
+  if (!Number.isFinite(quote.price) || quote.price <= 0) return false;
+  if (!Number.isFinite(referencePrice) || referencePrice <= 0) return false;
+
+  const priceRatio = quote.price / referencePrice;
+  if (priceRatio < 0.01 || priceRatio > 100) return false;
+
+  if (Number.isFinite(quote.previousClose) && quote.previousClose > 0) {
+    const previousCloseRatio = quote.previousClose / referencePrice;
+    if (previousCloseRatio < 0.01 || previousCloseRatio > 100) return false;
+  }
+
+  return true;
+}
+
+async function fetchQuotes(tickers, apiKey) {
+  const byTicker = {};
+  for (const ticker of tickers) {
+    try {
+      byTicker[ticker] = await fetchOneQuote(ticker, apiKey);
+    } catch (err) {
+      log(`ERROR fetching Finnhub data for ${ticker}: ${err.message}`);
+    }
+  }
+  return byTicker;
+}
+
+// Anti-spam: once a threshold crossing has alerted, stays silent until price moves back past
+// it (state.crossed -> false) and crosses again.
+export function evaluateGroupA(ticker, quote, state) {
+  const s = state[ticker] ?? {};
+  const distFromLow = (quote.price - quote.week52Low) / quote.week52Low;
+  const triggered = quote.price <= quote.week52Low || distFromLow <= THRESHOLD;
+
+  let message = null;
+  if (triggered && !s.crossed) {
+    const belowLow = quote.price < quote.week52Low;
+    message =
+      `${ticker}: $${quote.price.toFixed(2)} is ${belowLow ? 'BELOW its 52-week low' : 'within 17.5% of its 52-week low'} ` +
+      `of $${quote.week52Low.toFixed(2)} (${(distFromLow * 100).toFixed(1)}% from the low).`;
+  }
+  s.crossed = triggered;
+  state[ticker] = s;
+  return message;
+}
+
+export function evaluateGroupB(ticker, quote, state) {
+  const s = state[ticker] ?? {};
+  const highWaterMark = Math.max(s.highWaterMark ?? quote.week52High, quote.week52High, quote.price);
+  const pullback = (highWaterMark - quote.price) / highWaterMark;
+  const triggered = pullback >= THRESHOLD;
+
+  let message = null;
+  if (triggered && !s.crossed) {
+    message =
+      `${ticker}: pulled back ${(pullback * 100).toFixed(1)}% from its high-water mark of ` +
+      `$${highWaterMark.toFixed(2)} to $${quote.price.toFixed(2)}.`;
+  }
+  s.crossed = triggered;
+  s.highWaterMark = highWaterMark;
+  state[ticker] = s;
+  return message;
+}
+
+export async function runCheck({ force = false } = {}) {
+  const now = new Date();
+  const marketHoursBypassed = force || DEBUG_FORCE_RUN;
+  if (DEBUG_FORCE_RUN) log('DEBUG: FORCE_RUN=true — bypassing market-hours gate (real gate logic untouched).');
+  if (DEBUG_FORCE_ALERT_TICKER) log(`DEBUG: FORCE_ALERT_TICKER=${DEBUG_FORCE_ALERT_TICKER} — will send one synthetic test alert this run.`);
+
+  if (!marketHoursBypassed && !isMarketHoursET(now)) {
+    log('Skipped check — outside market hours (Mon-Fri 9:30am-4:00pm ET).');
+    return { ok: true, skipped: true };
+  }
+
+  if (!marketHoursBypassed && !isNearScheduledCheckTimeET(now)) {
+    log('Skipped check — within market hours but not near a scheduled check time (~10:00am or ~3:30pm ET).');
+    return { ok: true, skipped: true };
+  }
+
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+  const chatId = process.env.OWNER_TELEGRAM_USER_ID;
+  if (!token || !chatId) {
+    log('ERROR: missing TELEGRAM_BOT_TOKEN or OWNER_TELEGRAM_USER_ID — cannot deliver alerts.');
+    return { ok: false, error: 'Missing Telegram config' };
+  }
+
+  const finnhubApiKey = process.env.FINNHUB_API_KEY;
+  if (!finnhubApiKey) {
+    log('ERROR: missing FINNHUB_API_KEY — cannot fetch price data.');
+    return { ok: false, error: 'Missing Finnhub config' };
+  }
+
+  const allTickers = [...GROUP_A, ...GROUP_B];
+  // fetchQuotes fetches each ticker independently and never throws — a bad/missing response for
+  // one ticker (e.g. an ETF with no 52-week fundamentals) is logged and that ticker is skipped
+  // below, rather than aborting the whole check.
+  const quotes = await fetchQuotes(allTickers, finnhubApiKey);
+
+  const state = await loadState();
+  const bot = new TelegramBot(token);
+  const alertsSent = [];
+
+  for (const ticker of GROUP_A) {
+    const quote = quotes[ticker];
+    if (!quote || quote.price == null || quote.week52Low == null) {
+      log(`Checked ${ticker}: no usable price/52-week data from Finnhub, skipping.`);
+      continue;
+    }
+    if (!isPlausibleQuote(ticker, quote, quote.week52Low)) {
+      log(`ERROR: implausible data for ${ticker} (price=$${quote.price} 52w_low=$${quote.week52Low}) — skipping, not updating state.`);
+      continue;
+    }
+    log(`Checked ${ticker}: price=$${quote.price} 52w_low=$${quote.week52Low}`);
+    const message = evaluateGroupA(ticker, quote, state);
+    if (message) {
+      const telegramResponse = await bot.sendMessage(chatId, `Price alert — ${message}`);
+      log(`ALERT sent for ${ticker}: ${message}`);
+      log(`Telegram sendMessage response for ${ticker}: ${JSON.stringify(telegramResponse)}`);
+      alertsSent.push(message);
+    }
+  }
+
+  for (const ticker of GROUP_B) {
+    const quote = quotes[ticker];
+    if (!quote || quote.price == null || quote.week52High == null) {
+      log(`Checked ${ticker}: no usable price/52-week data from Finnhub, skipping.`);
+      continue;
+    }
+    if (!isPlausibleQuote(ticker, quote, quote.week52High)) {
+      log(`ERROR: implausible data for ${ticker} (price=$${quote.price} 52w_high=$${quote.week52High}) — skipping, not updating state.`);
+      continue;
+    }
+    const hwmBefore = state[ticker]?.highWaterMark ?? quote.week52High;
+    log(`Checked ${ticker}: price=$${quote.price} 52w_high=$${quote.week52High} hwm=$${hwmBefore}`);
+    const message = evaluateGroupB(ticker, quote, state);
+    if (message) {
+      const telegramResponse = await bot.sendMessage(chatId, `Price alert — ${message}`);
+      log(`ALERT sent for ${ticker}: ${message}`);
+      log(`Telegram sendMessage response for ${ticker}: ${JSON.stringify(telegramResponse)}`);
+      alertsSent.push(message);
+    }
+  }
+
+  await saveState(state);
+
+  // DEBUG: synthetic test alert for FORCE_ALERT_TICKER, sent after the real state save so it
+  // can never affect (or be affected by) real anti-spam/high-water-mark tracking. Only runs if
+  // the env var is set — inert otherwise.
+  if (DEBUG_FORCE_ALERT_TICKER) {
+    const debugMessage =
+      `[DEBUG TEST — NOT A REAL THRESHOLD CROSSING] ${DEBUG_FORCE_ALERT_TICKER}: synthetic alert ` +
+      `sent via FORCE_ALERT_TICKER to verify the Telegram delivery path end-to-end.`;
+    try {
+      const telegramResponse = await bot.sendMessage(chatId, `Price alert — ${debugMessage}`);
+      log(`DEBUG: Telegram sendMessage response: ${JSON.stringify(telegramResponse)}`);
+      alertsSent.push(debugMessage);
+    } catch (err) {
+      log(`DEBUG: Telegram sendMessage FAILED: ${err.message}`);
+    }
+  }
+
+  log(`Check complete. ${alertsSent.length} alert(s) sent.`);
+  return { ok: true, alertsSent };
+}
+
+// `node src/priceAlertMonitor.js` runs a normal market-hours-gated check.
+// `node src/priceAlertMonitor.js --force` bypasses the market-hours gate (for manual testing).
+if (import.meta.url === `file://${process.argv[1]}`) {
+  const force = process.argv.includes('--force');
+  runCheck({ force }).then((result) => {
+    console.log(JSON.stringify(result, null, 2));
+    process.exit(result.ok ? 0 : 1);
+  });
+}

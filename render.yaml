@@ -102,3 +102,58 @@ services:
         sync: false
       - key: GOOGLE_REFRESH_TOKEN
         sync: false
+
+  # Twice-a-day (not hourly) read-only price alert monitor (src/priceAlertMonitor.js).
+  # Notify-only — no trading, no cost basis, no Robinhood/Plaid access. Runs as two Cron Jobs
+  # rather than a long-lived web service since each just needs to wake up, check prices, maybe
+  # send a Telegram message, and exit. State (high-water marks, anti-spam crossing flags) is NOT
+  # kept on local disk — Cron Jobs get a fresh ephemeral container every run — it's persisted in
+  # Supabase's `price_alert_state` table instead, so it survives across runs.
+  #
+  # Two services, not one, because Render Cron schedules are UTC-only with no timezone option,
+  # and the two target ET times (~10:00am, ~3:30pm) convert to UTC minutes that differ (:00 vs
+  # :30) between EST and EDT — a single cron string can't express "10:00am ET" and "3:30pm ET"
+  # without either a manual edit every DST changeover or an 8-way cross-product of firings. Each
+  # service instead lists BOTH possible UTC hours for its one target time (one per DST regime);
+  # whichever fires at the "wrong" offset for the current season lands ~60 minutes from its ET
+  # target and the script's own isNearScheduledCheckTimeET() check skips it cleanly — so this
+  # self-adjusts across DST with no manual cron updates needed.
+  - type: cron
+    name: alex-ceo-price-alert-monitor-open
+    env: node
+    plan: starter
+    # 14:00 UTC = 10:00am EDT (summer); 15:00 UTC = 10:00am EST (winter).
+    schedule: "0 14,15 * * 1-5"
+    buildCommand: npm install
+    startCommand: node src/priceAlertMonitor.js
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: OWNER_TELEGRAM_USER_ID
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: FINNHUB_API_KEY
+        sync: false
+
+  - type: cron
+    name: alex-ceo-price-alert-monitor-close
+    env: node
+    plan: starter
+    # 19:30 UTC = 3:30pm EDT (summer); 20:30 UTC = 3:30pm EST (winter).
+    schedule: "30 19,20 * * 1-5"
+    buildCommand: npm install
+    startCommand: node src/priceAlertMonitor.js
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: OWNER_TELEGRAM_USER_ID
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: FINNHUB_API_KEY
+        sync: false
