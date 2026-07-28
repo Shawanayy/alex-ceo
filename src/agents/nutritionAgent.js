@@ -19,8 +19,13 @@ and offer general grocery/meal suggestions when asked — not personalized medic
 Notes on the data:
 - "nutrition_logs" is one row per logged meal (not per day) — Shane can log breakfast, lunch, dinner, and \
 snacks separately for the same date, so log_meal always inserts a new row rather than upserting.
-- calories/protein/carbs/fat/sugar are all optional integers/numbers — capture whatever Shane gives you, leave \
-the rest blank rather than guessing a number.
+- calories/protein/carbs/fat are estimates you must ALWAYS provide on every log_meal call, using your general \
+nutrition knowledge for the food(s) described — e.g. "2 cans of tuna and a bowl of white rice" ≈ 520 cal / 56g \
+protein / 68g carbs / 3g fat. Do not call log_meal with these fields left blank just because Shane didn't give \
+exact numbers himself; estimate them yourself every time, including for a second/third/etc. meal that repeats \
+something logged earlier today — always attach a fresh estimate to that new row, don't leave it empty. Only \
+skip a field if the description is too vague to estimate at all (e.g. "I ate something small"). sugar is \
+optional and can stay blank unless known or reasonably estimable.
 - IMPORTANT — avoiding duplicate rows: each delegation from Alex is a fresh, memoryless request, so if Shane \
 first reports a meal (logged with some fields missing) and then, in a *separate* follow-up delegation, supplies \
 the missing calorie/macro numbers for that *same* meal, do NOT call log_meal again — that creates a second, \
@@ -45,17 +50,19 @@ const toolDefs = [
       'Log a brand-new meal entry that has not been logged yet (always inserts, does not overwrite prior ' +
       'meals for the same date). Use this when Shane describes a meal for the first time. Do NOT use this for ' +
       "a follow-up that's just adding calorie/macro numbers to a meal already logged earlier — use update_meal " +
-      'for that instead.',
+      'for that instead. Always estimate calories/protein/carbs/fat yourself before calling this — do not leave ' +
+      'them blank just because Shane gave no exact numbers, and re-estimate fresh every time even if a similar ' +
+      'meal was already logged today.',
     input_schema: {
       type: 'object',
       properties: {
         date: { type: 'string', description: 'ISO date (YYYY-MM-DD), defaults to today' },
         meal_name: { type: 'string', description: "e.g. 'Chicken and rice', 'Protein shake'" },
-        calories: { type: 'integer', description: 'Calories, if known' },
-        protein: { type: 'integer', description: 'Grams of protein, if known' },
-        carbs: { type: 'integer', description: 'Grams of carbs, if known' },
-        fat: { type: 'number', description: 'Grams of fat, if known' },
-        sugar: { type: 'number', description: 'Grams of sugar, if known' },
+        calories: { type: 'integer', description: 'Estimated calories — always provide your best estimate' },
+        protein: { type: 'integer', description: 'Estimated grams of protein — always provide your best estimate' },
+        carbs: { type: 'integer', description: 'Estimated grams of carbs — always provide your best estimate' },
+        fat: { type: 'number', description: 'Estimated grams of fat — always provide your best estimate' },
+        sugar: { type: 'number', description: 'Grams of sugar, if known or reasonably estimable' },
         image_url: { type: 'string', description: 'Optional photo URL of the meal' },
       },
     },
