@@ -112,8 +112,13 @@ const httpServer = http.createServer(async (req, res) => {
   const authorized = pathToken === TOKEN || headerAuth === `Bearer ${TOKEN}`;
 
   if (!authorized) {
-    res.writeHead(401, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: 'Unauthorized' }));
+    // 404, not 401: a 401 here reads to some MCP clients (incl. Claude.ai's custom-connector
+    // setup) as "this server wants OAuth," triggering a dynamic-client-registration attempt that
+    // fails since we don't do OAuth — the real auth gate is the secret path/header, not a
+    // WWW-Authenticate challenge. Returning 404 for anything unauthenticated avoids that false
+    // signal; the correct /mcp/<token> URL still authorizes and works normally.
+    res.writeHead(404, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Not found' }));
     return;
   }
 
