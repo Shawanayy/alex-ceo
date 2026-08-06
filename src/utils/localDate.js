@@ -51,9 +51,13 @@ export async function setUserTimeZone(timezoneInput) {
   } catch {
     throw new Error(`"${timezoneInput}" isn't a recognized timezone.`);
   }
+  // `timezone_mode` has a DB check constraint allowing only 'auto' | 'oregon' | 'hawaii' —
+  // writing 'manual' here always violated it, which is why set_timezone silently failed.
+  const timezoneMode =
+    timezone === 'Pacific/Honolulu' ? 'hawaii' : timezone === 'America/Los_Angeles' ? 'oregon' : 'auto';
   const { error } = await supabase
     .from('users')
-    .update({ timezone, timezone_mode: 'manual' })
+    .update({ timezone, timezone_mode: timezoneMode })
     .eq('id', DEFAULT_USER_ID);
   if (error) throw error;
   return timezone;
