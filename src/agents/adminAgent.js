@@ -4,16 +4,16 @@ dotenv.config();
 
 import { getCalendarClient, getGmailClient } from '../google/googleClient.js';
 import { supabase } from '../supabaseClient.js';
+import { getUserTimeZone } from '../utils/localDate.js';
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 const MODEL = process.env.ALEX_MODEL || 'claude-sonnet-5';
 const DEFAULT_USER_ID = process.env.DEFAULT_USER_ID;
 
-// Shane's calendar is configured in this zone (confirmed via the Calendar API's own
-// calendar-level "timeZone" field). create_event pins to this explicitly rather than
-// leaving Google to guess from a bare/ambiguous dateTime string, which previously caused
-// events to land hours off from the requested time.
-const DEFAULT_TIME_ZONE = 'America/Los_Angeles';
+// create_event/update_event pin bare dateTime strings to Shane's CURRENT timezone (read live
+// from Supabase's users.timezone, kept in sync via the set_timezone tool whenever Shane says
+// he's switched between Hawaii and Oregon) rather than leaving Google to guess, or hardcoding
+// one zone — hardcoding previously caused events to land hours off once he was on the other coast.
 
 const SYSTEM_PROMPT = `You are the Admin Agent, a specialist sub-agent that Alex (Shane Pinho's Chief of \
 Staff) delegates Calendar and Gmail requests to. You have real tools for Google Calendar and Gmail — use \
@@ -27,6 +27,26 @@ You can create, edit (update), and delete Calendar events. update_event and dele
 event's Google Calendar "id" — get it from list_events first if you don't already have it from earlier in \
 this conversation. Every create/update/delete you make on Google Calendar is automatically mirrored to \
 Shane's LifeOS dashboard, so you don't need a separate step for that.
+
+Every event is either "hard" (class, work, meetings, appointments, flights — can't easily move) or \
+"flexible" (gym/workouts, running, studying, reading, meditation, personal projects, meal prep, cleaning, \
+planning, downtime — can move). Pass event_type on create_event/update_event when you're confident which \
+one it is; if you omit it, keyword-based auto-classification runs and defaults to "hard" when unclear \
+(safer than silently treating something as movable). You do NOT need to manually check for scheduling \
+conflicts yourself — the system automatically detects when a new/updated "hard" event overlaps an existing \
+"flexible" one and pushes Shane a Telegram notification with alternate time options. If Shane later replies \
+picking one of those alternate times (or a different time) for the bumped flexible event, call update_event \
+on that flexible event's id to actually move it.
+
+Be proactive, not just reactive: when Shane asks you to "plan my day/week", "schedule my workouts", "block \
+time for studying", or similar — don't just describe a plan in text, actually create the events. Call \
+find_open_slots first to see genuinely free windows (don't guess or assume gaps), then call create_event \
+with event_type: 'flexible' for each block you place. Shane's known scheduling preferences (read them from \
+the request context Alex gives you, or ask Alex to include them): timing varies by convenience but he \
+prefers mornings and, in Oregon, lifting when already on campus; peak focus is usually at night or between \
+classes; study sessions run ~45-60 min; he wants 8 hours of sleep with bedtime ~11pm-12am; he wants 1-2 \
+hours of daily downtime, not just on weekends; NEVER schedule a workout after 9pm; and in Oregon, keep \
+Sundays open for family time. Respect these when placing flexible blocks.
 
 Be concise and factual in your final answer — you're reporting back to another agent (Alex), not chatting \
 with Shane directly. Include concrete details (event times, email subjects/senders) rather than vague \
@@ -70,8 +90,32 @@ const toolDefs = [
           items: { type: 'string' },
           description: 'Optional list of attendee email addresses',
         },
+        event_type: {
+          type: 'string',
+          enum: ['hard', 'flexible'],
+          description:
+            "'hard' (class/work/meeting/appointment/flight — can't easily move) or 'flexible' " +
+            '(gym/study/reading/meditation/personal project/meal prep/cleaning/planning/downtime — can ' +
+            'move). Omit to auto-classify from the title/description.',
+        },
       },
       required: ['summary', 'start', 'end'],
+    },
+  },
+  {
+    name: 'find_open_slots',
+    description:
+      "Find genuinely free windows on Shane's primary Google Calendar within a date range. Use this " +
+      'BEFORE proactively placing flexible blocks (workouts, study, downtime, etc.) so you place them in ' +
+      'time that is actually open, not just assumed to be.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        date_min: { type: 'string', description: "Start date, 'YYYY-MM-DD', Shane's local time." },
+        date_max: { type: 'string', description: "End date (exclusive), 'YYYY-MM-DD'." },
+        min_duration_min: { type: 'integer', description: 'Minimum gap length in minutes to report, default 30.' },
+      },
+      required: ['date_min', 'date_max'],
     },
   },
   {
@@ -100,6 +144,11 @@ const toolDefs = [
           type: 'array',
           items: { type: 'string' },
           description: 'New list of attendee email addresses (replaces the existing list if provided)',
+        },
+        event_type: {
+          type: 'string',
+          enum: ['hard', 'flexible'],
+          description: "Reclassify the event as 'hard' or 'flexible'. Omit to keep its current classification.",
         },
       },
       required: ['event_id'],
@@ -162,12 +211,37 @@ function buildRawEmail({ to, subject, body }) {
     .replace(/=+$/, '');
 }
 
+// Hard = class/work/meeting/appointment/flight/exam/interview — can't easily move.
+// Flexible = gym/workout/study/reading/meditation/personal project/meal prep/cleaning/planning/
+// downtime — can move. Defaults to 'hard' when nothing matches, since silently treating an
+// unrecognized event as movable is the riskier failure mode.
+const FLEXIBLE_KEYWORDS = [
+  'gym', 'workout', 'work out', 'run', 'running', 'jog', 'lift', 'lifting',
+  'study', 'studying', 'homework', 'read', 'reading', 'meditate', 'meditation',
+  'personal project', 'meal prep', 'mealprep', 'clean', 'cleaning', 'plan', 'planning', 'downtime',
+];
+const HARD_KEYWORDS = ['class', 'work', 'meeting', 'appointment', 'flight', 'exam', 'interview', 'shift'];
+const WORKOUT_KEYWORDS = ['gym', 'workout', 'work out', 'run', 'running', 'jog', 'lift', 'lifting'];
+
+function classifyEventType(summary, description, explicitType) {
+  if (explicitType === 'hard' || explicitType === 'flexible') return explicitType;
+  const text = `${summary || ''} ${description || ''}`.toLowerCase();
+  if (FLEXIBLE_KEYWORDS.some((k) => text.includes(k))) return 'flexible';
+  if (HARD_KEYWORDS.some((k) => text.includes(k))) return 'hard';
+  return 'hard';
+}
+
+function isWorkoutTitle(title) {
+  const t = (title || '').toLowerCase();
+  return WORKOUT_KEYWORDS.some((k) => t.includes(k));
+}
+
 // Mirrors a created/updated Google Calendar event into the LifeOS dashboard's calendar_events
 // table, keyed on google_event_id, so Shane's dashboard reflects edits Alex makes without
 // depending on the (currently broken) n8n calendar sync workflow. Sync failures are logged but
 // never thrown — a dashboard mirroring hiccup shouldn't fail the actual Calendar write, which is
 // the part Shane actually asked for.
-async function upsertDashboardEvent(googleEvent) {
+async function upsertDashboardEvent(googleEvent, eventType) {
   try {
     const row = {
       user_id: DEFAULT_USER_ID,
@@ -178,6 +252,7 @@ async function upsertDashboardEvent(googleEvent) {
       start_time: googleEvent.start?.dateTime ?? googleEvent.start?.date ?? null,
       end_time: googleEvent.end?.dateTime ?? googleEvent.end?.date ?? null,
       source: 'alex',
+      event_type: eventType ?? 'hard',
     };
     const { error } = await supabase
       .from('calendar_events')
@@ -186,6 +261,153 @@ async function upsertDashboardEvent(googleEvent) {
   } catch (err) {
     console.error('[Admin Agent] Dashboard sync (upsert) threw:', err?.message ?? err);
   }
+}
+
+// Looks 2 calendar days ahead for a genuinely open slot the same length as the bumped flexible
+// event, respecting the 6am-11pm window and (for workout titles) the "never after 9pm" rule.
+// Best-effort: on any failure, returns no candidates rather than throwing, so a conflict
+// notification still goes out (just without suggested times) instead of silently vanishing.
+async function suggestAlternateSlots({ flexEvent, durationMs, excludeGoogleEventId }) {
+  const DAY_START_HOUR = 6;
+  const DAY_END_HOUR = 23;
+  const NO_GO_WORKOUT_AFTER_HOUR = 21; // from sched_no_go_workout_after preference
+  try {
+    const origStart = new Date(flexEvent.start_time);
+    const dayStart = new Date(origStart);
+    dayStart.setHours(0, 0, 0, 0);
+    const rangeEnd = new Date(dayStart);
+    rangeEnd.setDate(rangeEnd.getDate() + 2);
+
+    const calendar = getCalendarClient();
+    const res = await calendar.events.list({
+      calendarId: 'primary',
+      timeMin: dayStart.toISOString(),
+      timeMax: rangeEnd.toISOString(),
+      singleEvents: true,
+      orderBy: 'startTime',
+    });
+    const busy = (res.data.items ?? [])
+      .filter((e) => e.id !== excludeGoogleEventId && e.start?.dateTime && e.end?.dateTime)
+      .map((e) => ({ start: new Date(e.start.dateTime), end: new Date(e.end.dateTime) }));
+
+    const isWorkout = isWorkoutTitle(flexEvent.title);
+    const stepMs = 30 * 60 * 1000;
+    const candidates = [];
+    for (
+      let slotStart = new Date(dayStart.getTime() + DAY_START_HOUR * 3600000);
+      slotStart < rangeEnd && candidates.length < 3;
+      slotStart = new Date(slotStart.getTime() + stepMs)
+    ) {
+      const slotEnd = new Date(slotStart.getTime() + durationMs);
+      const startHour = slotStart.getHours() + slotStart.getMinutes() / 60;
+      const endHour = startHour + durationMs / 3600000;
+      if (startHour < DAY_START_HOUR || endHour > DAY_END_HOUR) continue;
+      if (isWorkout && startHour >= NO_GO_WORKOUT_AFTER_HOUR) continue;
+      const clash = busy.some((b) => slotStart < b.end && b.start < slotEnd);
+      if (clash) continue;
+      candidates.push(slotStart);
+    }
+    return candidates;
+  } catch (err) {
+    console.error('[Admin Agent] suggestAlternateSlots failed:', err?.message ?? err);
+    return [];
+  }
+}
+
+// Automatic conflict detection: fires whenever a HARD event is created/updated. Checks the
+// dashboard's calendar_events for FLEXIBLE events it now overlaps. Never auto-moves anything —
+// only pushes a high-urgency notification (delivered to Telegram by the background loop within
+// 5 min) with suggested alternate times, so Shane stays in control of the reschedule.
+async function checkAndNotifyConflicts({ newEvent, eventType }) {
+  try {
+    if (eventType !== 'hard') return;
+    const startISO = newEvent.start?.dateTime;
+    const endISO = newEvent.end?.dateTime;
+    if (!startISO || !endISO) return; // skip all-day events — nothing meaningful to overlap-check
+
+    const { data: flexEvents, error } = await supabase
+      .from('calendar_events')
+      .select('*')
+      .eq('event_type', 'flexible')
+      .neq('google_event_id', newEvent.id)
+      .lt('start_time', endISO)
+      .gt('end_time', startISO);
+    if (error) {
+      console.error('[Admin Agent] Conflict check query failed:', error.message);
+      return;
+    }
+    if (!flexEvents || flexEvents.length === 0) return;
+
+    for (const flex of flexEvents) {
+      const durationMs = new Date(flex.end_time) - new Date(flex.start_time);
+      const alternates = await suggestAlternateSlots({
+        flexEvent: flex,
+        durationMs,
+        excludeGoogleEventId: flex.google_event_id,
+      });
+      const altText = alternates.length
+        ? alternates
+            .map(
+              (d, i) =>
+                `${i + 1}. ${d.toLocaleString('en-US', {
+                  weekday: 'short',
+                  hour: 'numeric',
+                  minute: '2-digit',
+                })}`
+            )
+            .join('\n')
+        : "Couldn't find an open alternate slot in the next 2 days — you'll need to pick a time manually.";
+
+      const { error: notifErr } = await supabase.from('notifications').insert({
+        source_agent: 'admin_agent',
+        urgency: 'high',
+        title: `Conflict: "${newEvent.summary}" overlaps "${flex.title}"`,
+        body:
+          `You just added "${newEvent.summary}" which overlaps your flexible block "${flex.title}". ` +
+          `Move it?\n${altText}\nReply with a number, a different time, or "leave it" to keep both as-is.`,
+      });
+      if (notifErr) console.error('[Admin Agent] Failed to push conflict notification:', notifErr.message);
+    }
+  } catch (err) {
+    console.error('[Admin Agent] Conflict detection threw:', err?.message ?? err);
+  }
+}
+
+async function findOpenSlots({ date_min, date_max, min_duration_min }) {
+  const calendar = getCalendarClient();
+  const timeZone = await getUserTimeZone();
+  const minDuration = (min_duration_min ?? 30) * 60 * 1000;
+  const rangeStart = new Date(`${date_min}T00:00:00`);
+  const rangeEnd = new Date(`${date_max}T00:00:00`);
+
+  const res = await calendar.events.list({
+    calendarId: 'primary',
+    timeMin: rangeStart.toISOString(),
+    timeMax: rangeEnd.toISOString(),
+    singleEvents: true,
+    orderBy: 'startTime',
+  });
+  const busy = (res.data.items ?? [])
+    .filter((e) => e.start?.dateTime && e.end?.dateTime)
+    .map((e) => ({ start: new Date(e.start.dateTime), end: new Date(e.end.dateTime) }))
+    .sort((a, b) => a.start - b.start);
+
+  // NOTE: MVP gap-finder — treats the whole range as one open block minus busy events, rather
+  // than clamping each day to a wake/sleep window. Good enough for Alex to reason over when
+  // placing flexible blocks; Alex is instructed to respect Shane's stated prefs (e.g. no workouts
+  // after 9pm) on top of these raw gaps.
+  const slots = [];
+  let cursor = rangeStart;
+  for (const b of busy) {
+    if (b.start - cursor >= minDuration) {
+      slots.push({ start: cursor.toISOString(), end: b.start.toISOString() });
+    }
+    if (b.end > cursor) cursor = b.end;
+  }
+  if (rangeEnd - cursor >= minDuration) {
+    slots.push({ start: cursor.toISOString(), end: rangeEnd.toISOString() });
+  }
+  return { ok: true, time_zone: timeZone, slots };
 }
 
 async function deleteDashboardEvent(googleEventId) {
@@ -217,29 +439,33 @@ async function listEvents({ time_min, time_max, max_results }) {
   return { ok: true, events };
 }
 
-async function createEvent({ summary, description, start, end, attendees }) {
+async function createEvent({ summary, description, start, end, attendees, event_type }) {
   const calendar = getCalendarClient();
+  const timeZone = await getUserTimeZone();
   const res = await calendar.events.insert({
     calendarId: 'primary',
     requestBody: {
       summary,
       description: description ?? undefined,
-      start: { dateTime: start, timeZone: DEFAULT_TIME_ZONE },
-      end: { dateTime: end, timeZone: DEFAULT_TIME_ZONE },
+      start: { dateTime: start, timeZone },
+      end: { dateTime: end, timeZone },
       attendees: (attendees ?? []).map((email) => ({ email })),
     },
   });
-  await upsertDashboardEvent(res.data);
-  return { ok: true, event: { id: res.data.id, htmlLink: res.data.htmlLink } };
+  const resolvedType = classifyEventType(summary, description, event_type);
+  await upsertDashboardEvent(res.data, resolvedType);
+  await checkAndNotifyConflicts({ newEvent: res.data, eventType: resolvedType });
+  return { ok: true, event: { id: res.data.id, htmlLink: res.data.htmlLink, event_type: resolvedType } };
 }
 
-async function updateEvent({ event_id, summary, description, start, end, attendees }) {
+async function updateEvent({ event_id, summary, description, start, end, attendees, event_type }) {
   const calendar = getCalendarClient();
+  const timeZone = await getUserTimeZone();
   const requestBody = {};
   if (summary !== undefined) requestBody.summary = summary;
   if (description !== undefined) requestBody.description = description;
-  if (start !== undefined) requestBody.start = { dateTime: start, timeZone: DEFAULT_TIME_ZONE };
-  if (end !== undefined) requestBody.end = { dateTime: end, timeZone: DEFAULT_TIME_ZONE };
+  if (start !== undefined) requestBody.start = { dateTime: start, timeZone };
+  if (end !== undefined) requestBody.end = { dateTime: end, timeZone };
   if (attendees !== undefined) requestBody.attendees = attendees.map((email) => ({ email }));
 
   const res = await calendar.events.patch({
@@ -247,8 +473,19 @@ async function updateEvent({ event_id, summary, description, start, end, attende
     eventId: event_id,
     requestBody,
   });
-  await upsertDashboardEvent(res.data);
-  return { ok: true, event: { id: res.data.id, htmlLink: res.data.htmlLink } };
+
+  let resolvedType = event_type;
+  if (resolvedType !== 'hard' && resolvedType !== 'flexible') {
+    const { data: existing } = await supabase
+      .from('calendar_events')
+      .select('event_type')
+      .eq('google_event_id', event_id)
+      .maybeSingle();
+    resolvedType = existing?.event_type || classifyEventType(res.data.summary, res.data.description);
+  }
+  await upsertDashboardEvent(res.data, resolvedType);
+  await checkAndNotifyConflicts({ newEvent: res.data, eventType: resolvedType });
+  return { ok: true, event: { id: res.data.id, htmlLink: res.data.htmlLink, event_type: resolvedType } };
 }
 
 async function deleteEvent({ event_id }) {
@@ -308,6 +545,8 @@ async function runAdminTool(name, input) {
       return listEvents(input);
     case 'create_event':
       return createEvent(input);
+    case 'find_open_slots':
+      return findOpenSlots(input);
     case 'update_event':
       return updateEvent(input);
     case 'delete_event':

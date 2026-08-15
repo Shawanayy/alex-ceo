@@ -1,4 +1,5 @@
 import { supabase } from './supabaseClient.js';
+import { setUserTimeZone } from './utils/localDate.js';
 import { runAdminAgent } from './agents/adminAgent.js';
 import { runLearningAgent } from './agents/learningAgent.js';
 import { runCareerAgent } from './agents/careerAgent.js';
@@ -101,6 +102,26 @@ export const toolDefs = [
         },
       },
       required: ['content'],
+    },
+  },
+  {
+    name: 'set_timezone',
+    description:
+      "Update the timezone Shane is currently in. Call this immediately whenever Shane mentions he's " +
+      "switched locations (e.g. \"I'm back in Oregon\", \"just landed in Hawaii\", \"I'm on Pacific time " +
+      'now") — do not wait to be asked. This drives every date-sensitive thing: what "today" means for ' +
+      'nutrition/fitness/sleep/habit/mood logging and daily totals, and what time zone bare meeting times ' +
+      "get interpreted in when creating/updating Calendar events. Accepts a plain location/timezone name " +
+      "(\"Oregon\", \"Hawaii\", \"Hawaiʻi\", \"Pacific time\") or a raw IANA zone (\"America/Los_Angeles\").",
+    input_schema: {
+      type: 'object',
+      properties: {
+        timezone: {
+          type: 'string',
+          description: 'Where Shane is now, e.g. "Oregon", "Hawaii", or an IANA zone like "America/Los_Angeles"',
+        },
+      },
+      required: ['timezone'],
     },
   },
   {
@@ -769,6 +790,11 @@ async function completeTask({ task_id }) {
   return { ok: true, task: data };
 }
 
+async function setTimezone({ timezone }) {
+  const resolved = await setUserTimeZone(timezone);
+  return { ok: true, timezone: resolved };
+}
+
 async function remember({ content, memory_type, importance }) {
   const { data, error } = await supabase
     .from('memories')
@@ -1013,6 +1039,8 @@ export async function runTool(name, input, telegramMessageId) {
       return completeTask(input);
     case 'remember':
       return remember(input);
+    case 'set_timezone':
+      return setTimezone(input);
     case 'delegate_to_admin_agent':
       return delegateToAdminAgent(input);
     case 'delegate_to_learning_agent':

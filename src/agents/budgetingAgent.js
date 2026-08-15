@@ -239,7 +239,7 @@ async function listPlaidConnections() {
 // /transactions/get — each item's cursor is persisted on plaid_items so re-syncing only fetches
 // what changed since last time. Amount sign convention: Plaid reports positive = money leaving
 // the account; our transactions table uses negative = expense, so it's flipped on the way in.
-async function syncPlaidTransactions() {
+export async function syncPlaidTransactions() {
   const { data: items, error: itemsErr } = await supabase
     .from('plaid_items')
     .select('*')

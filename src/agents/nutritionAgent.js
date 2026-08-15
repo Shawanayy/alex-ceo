@@ -19,13 +19,16 @@ and offer general grocery/meal suggestions when asked — not personalized medic
 Notes on the data:
 - "nutrition_logs" is one row per logged meal (not per day) — Shane can log breakfast, lunch, dinner, and \
 snacks separately for the same date, so log_meal always inserts a new row rather than upserting.
-- calories/protein/carbs/fat are estimates you must ALWAYS provide on every log_meal call, using your general \
-nutrition knowledge for the food(s) described — e.g. "2 cans of tuna and a bowl of white rice" ≈ 520 cal / 56g \
-protein / 68g carbs / 3g fat. Do not call log_meal with these fields left blank just because Shane didn't give \
-exact numbers himself; estimate them yourself every time, including for a second/third/etc. meal that repeats \
-something logged earlier today — always attach a fresh estimate to that new row, don't leave it empty. Only \
-skip a field if the description is too vague to estimate at all (e.g. "I ate something small"). sugar is \
-optional and can stay blank unless known or reasonably estimable.
+- calories/protein/carbs/fat/sugar are estimates you must ALWAYS provide on every log_meal call, using your \
+general nutrition knowledge for the food(s) described — e.g. "2 cans of tuna and a bowl of white rice" ≈ 520 \
+cal / 56g protein / 68g carbs / 3g fat / 1g sugar. Do not call log_meal with these fields left blank just \
+because Shane didn't give exact numbers himself; estimate them yourself every time, including for a \
+second/third/etc. meal that repeats something logged earlier today — always attach a fresh estimate to that \
+new row, don't leave it empty. Only skip a field if the description is too vague to estimate at all (e.g. "I \
+ate something small").
+- If Shane says he logged something by mistake, wants to undo/remove a meal, or asks you to delete a food log, \
+use list_meals first to find the matching row (confirm it with Shane if more than one plausible match exists), \
+then call delete_meal with its id. Never delete a meal you haven't positively identified via list_meals.
 - IMPORTANT — avoiding duplicate rows: each delegation from Alex is a fresh, memoryless request, so if Shane \
 first reports a meal (logged with some fields missing) and then, in a *separate* follow-up delegation, supplies \
 the missing calorie/macro numbers for that *same* meal, do NOT call log_meal again — that creates a second, \
@@ -62,7 +65,7 @@ const toolDefs = [
         protein: { type: 'integer', description: 'Estimated grams of protein — always provide your best estimate' },
         carbs: { type: 'integer', description: 'Estimated grams of carbs — always provide your best estimate' },
         fat: { type: 'number', description: 'Estimated grams of fat — always provide your best estimate' },
-        sugar: { type: 'number', description: 'Grams of sugar, if known or reasonably estimable' },
+        sugar: { type: 'number', description: 'Estimated grams of sugar — always provide your best estimate' },
         image_url: { type: 'string', description: 'Optional photo URL of the meal' },
       },
     },
@@ -84,6 +87,20 @@ const toolDefs = [
         fat: { type: 'number', description: 'Grams of fat, if known' },
         sugar: { type: 'number', description: 'Grams of sugar, if known' },
         image_url: { type: 'string' },
+      },
+      required: ['id'],
+    },
+  },
+  {
+    name: 'delete_meal',
+    description:
+      'Permanently delete a logged meal entry by id — use this when Shane says he logged something by ' +
+      'mistake or wants a food log removed. Always find the correct row via list_meals first; only delete a ' +
+      "row you've positively matched to what Shane described.",
+    input_schema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'The id of the nutrition_logs row to delete (from list_meals)' },
       },
       required: ['id'],
     },
@@ -147,6 +164,13 @@ async function updateMeal({ id, meal_name, calories, protein, carbs, fat, sugar,
   const { data, error } = await supabase.from('nutrition_logs').update(patch).eq('id', id).select().single();
   if (error) throw error;
   return { ok: true, meal: data };
+}
+
+async function deleteMeal({ id }) {
+  if (!id) throw new Error('delete_meal requires an id (use list_meals to find it)');
+  const { data, error } = await supabase.from('nutrition_logs').delete().eq('id', id).select().single();
+  if (error) throw error;
+  return { ok: true, deleted: data };
 }
 
 async function listMeals({ date, limit }) {
@@ -234,6 +258,8 @@ async function runNutritionTool(name, input) {
       return logMeal(input);
     case 'update_meal':
       return updateMeal(input);
+    case 'delete_meal':
+      return deleteMeal(input);
     case 'list_meals':
       return listMeals(input);
     case 'get_daily_totals':

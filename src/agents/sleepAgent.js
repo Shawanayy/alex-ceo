@@ -3,6 +3,7 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 import { supabase } from '../supabaseClient.js';
+import { todayLocal } from '../utils/localDate.js';
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 const MODEL = process.env.ALEX_MODEL || 'claude-sonnet-5';
@@ -71,7 +72,7 @@ const toolDefs = [
 ];
 
 async function logSleep({ date, bedtime, wake_time, hours_slept, quality, notes }) {
-  const row = { user_id: DEFAULT_USER_ID, date: date ?? new Date().toISOString().slice(0, 10) };
+  const row = { user_id: DEFAULT_USER_ID, date: date ?? (await todayLocal()) };
   if (bedtime !== undefined) row.bedtime = bedtime;
   if (wake_time !== undefined) row.wake_time = wake_time;
   if (hours_slept !== undefined) row.hours_slept = hours_slept;

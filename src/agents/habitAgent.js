@@ -3,6 +3,7 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 import { supabase } from '../supabaseClient.js';
+import { todayLocal } from '../utils/localDate.js';
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 const MODEL = process.env.ALEX_MODEL || 'claude-sonnet-5';
@@ -119,7 +120,7 @@ async function logHabitCompletion({ title, date, done, value }) {
 
   const row = {
     goal_id: habit.id,
-    date: date ?? new Date().toISOString().slice(0, 10),
+    date: date ?? (await todayLocal()),
     done: done ?? true,
   };
   if (value !== undefined) row.value = value;

@@ -3,6 +3,7 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 import { supabase } from '../supabaseClient.js';
+import { todayLocal } from '../utils/localDate.js';
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 const MODEL = process.env.ALEX_MODEL || 'claude-sonnet-5';
@@ -74,7 +75,7 @@ const toolDefs = [
 ];
 
 async function logMoodCheckin({ date, mood, stress, notes }) {
-  const row = { user_id: DEFAULT_USER_ID, date: date ?? new Date().toISOString().slice(0, 10) };
+  const row = { user_id: DEFAULT_USER_ID, date: date ?? (await todayLocal()) };
   if (mood !== undefined) row.mood = mood;
   if (stress !== undefined) row.stress = stress;
   if (notes !== undefined) row.notes = notes;
