@@ -1,5 +1,5 @@
 import { supabase } from './supabaseClient.js';
-import { setUserTimeZone } from './utils/localDate.js';
+import { setUserTimeZone, getCurrentDateTimeContext } from './utils/localDate.js';
 import { runAdminAgent } from './agents/adminAgent.js';
 import { runLearningAgent } from './agents/learningAgent.js';
 import { runCareerAgent } from './agents/careerAgent.js';
@@ -1029,7 +1029,19 @@ async function logGap({ request_summary, reason }, telegramMessageId) {
 
 // Dispatches a tool_use block to its handler. `telegramMessageId` is threaded
 // through for log_gap so gaps are traceable back to the triggering message.
+//
+// Sub-agents (adminAgent, nutritionAgent, etc.) each run their own isolated, stateless
+// Claude tool-use loop and never see Alex's system prompt — so without this, they have zero
+// sense of "now" and either guess or ask Shane what time it is. Every delegate_to_* tool
+// forwards a single free-text `request` string to its sub-agent (see delegateTo* below), so
+// prefixing that string here — once, centrally — gives all ~32 sub-agents live date/time
+// awareness without editing each agent file individually.
 export async function runTool(name, input, telegramMessageId) {
+  if (name.startsWith('delegate_to_') && input?.request) {
+    const dateTimeContext = await getCurrentDateTimeContext();
+    input = { ...input, request: `[${dateTimeContext}]\n\n${input.request}` };
+  }
+
   switch (name) {
     case 'add_task':
       return addTask(input);

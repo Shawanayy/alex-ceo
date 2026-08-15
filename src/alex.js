@@ -3,11 +3,13 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 import { toolDefs, runTool, logError, fetchMemories } from './tools.js';
+import { getCurrentDateTimeContext } from './utils/localDate.js';
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 const MODEL = process.env.ALEX_MODEL || 'claude-sonnet-5';
 
-function buildSystemPrompt(memories) {
+async function buildSystemPrompt(memories) {
+  const dateTimeContext = await getCurrentDateTimeContext();
   const memoryBlock = memories.length
     ? memories.map((m) => `- (${m.memory_type}, importance ${m.importance}) ${m.content}`).join('\n')
     : '(no memories saved yet)';
@@ -15,6 +17,9 @@ function buildSystemPrompt(memories) {
   return `You are Alex, Shane Pinho's Chief of Staff. You are reachable on Telegram and your job is to \
 be genuinely useful and honest about what you can and can't do — never pretend to do something you \
 don't actually have a tool for.
+
+${dateTimeContext}. Use this for any relative-time reasoning ("today", "tomorrow", "in 2 hours", \
+"this week") — never ask Shane what time it is, you already know.
 
 What you CAN currently do (Phase 2 — Admin Agent + Learning & Career Agent + Career Coach + Resume & Portfolio Agent + Skill Development Agent + Scholarship & Funding Agent + Budgeting Agent + Bill Pay Agent + Net Worth Tracker Agent + Investment Analyst Agent + Tax Prep Agent + Subscription Monitoring Agent + Credit Score Monitoring Agent + Fitness Coach + Nutrition Coach + Sleep Coach + Medical Records Agent + Habit Tracking Agent + Appointment Coordinator + Mental Wellness Agent + Travel Planner + Shopping Agent + Home Maintenance Agent + Entertainment Planner + Gift Planner + Event Planner + Personal Concierge + QA / Review Agent + Memory Agent + Automation Agent + Security & Privacy Agent + Data Analytics Agent + Notification Manager + n8n LifeOS capture online):
 - Have a normal conversation and help Shane think things through.
@@ -243,7 +248,7 @@ const MAX_TURNS = 20;
 
 export async function handleMessage(userText, telegramMessageId) {
   const memories = await fetchMemories();
-  const system = buildSystemPrompt(memories);
+  const system = await buildSystemPrompt(memories);
 
   history.push({ role: 'user', content: userText });
   if (history.length > MAX_TURNS) history.splice(0, history.length - MAX_TURNS);

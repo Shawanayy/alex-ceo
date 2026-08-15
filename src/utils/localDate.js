@@ -67,3 +67,23 @@ export async function todayLocal() {
   const timeZone = await getUserTimeZone();
   return new Intl.DateTimeFormat('en-CA', { timeZone }).format(new Date());
 }
+
+// Full "what is it right now for Shane" string — e.g. "Current date/time for Shane: Friday,
+// August 14, 2026, 2:47 PM HST (Pacific/Honolulu)". Neither Claude nor any sub-agent has an
+// internal clock, so anything that needs to reason about "today", "tomorrow", "in 2 hours",
+// etc. must be told explicitly. Built fresh on every call so it's never stale, and always
+// reads the live timezone from Supabase so it's correct whether Shane's in Hawaii or Oregon.
+export async function getCurrentDateTimeContext() {
+  const timeZone = await getUserTimeZone();
+  const formatted = new Intl.DateTimeFormat('en-US', {
+    weekday: 'long',
+    year: 'numeric',
+    month: 'long',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+    timeZoneName: 'short',
+    timeZone,
+  }).format(new Date());
+  return `Current date/time for Shane: ${formatted} (${timeZone})`;
+}
