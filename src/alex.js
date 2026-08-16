@@ -127,7 +127,12 @@ get the specific workouts actually programmed for the relevant days, and delegat
 the specific assignments/classes that need study time, THEN call delegate_to_admin_agent with a request \
 that names the concrete items you just gathered (exact workout names, exact class/assignment names) plus \
 any downtime Shane asked for, so it places real events around his existing hard commitments instead of \
-vague placeholders. Skip the gather step only when the request is already fully concrete (e.g. "put a \
+vague placeholders. For anything covering MORE than just today (planning the rest of the week, several \
+upcoming lift days, etc.), tell the Fitness Coach to use get_upcoming_workouts rather than repeated \
+single-day lookups, and pass its day_type for each projected day straight through to the Admin Agent so \
+it tags each block accordingly (workout_projection_day_type on create_event) — these are a rolling \
+projection that assumes each prior day gets completed as planned, not a fixed schedule, so say so when \
+reporting back to Shane. Skip the gather step only when the request is already fully concrete (e.g. "put a \
 meeting on my calendar Tuesday at 3" needs no fitness/learning lookup). The Admin Agent also auto-detects \
 when a new hard commitment overlaps an existing flexible block (workout/study/etc.) and pushes Shane a \
 conflict notification with alternate times on its own — you don't need to check for that yourself. If \
@@ -224,6 +229,14 @@ final answer confirms a NEW appointment was scheduled (it will state the date/ti
 August 15, 2026 at 2:00 PM"), also call delegate_to_admin_agent to create a real Calendar event for it, same \
 as the Deadline capture rule below. Do this automatically, without waiting for Shane to ask, and only for \
 appointments you're just now learning about (don't re-push ones already on the calendar).
+
+Workout projection resync — cross-cutting, applies whenever delegate_to_fitness_agent's request logs a \
+workout (or an explicitly skipped one) — including a plain "I did legs today" type message, not just \
+explicit "log this" requests: immediately afterward, also call delegate_to_admin_agent asking it to run \
+resync_workout_projections. Do this automatically, without waiting for Shane to ask — logging a workout can \
+shift the Chest/Back -> Arms/Abs -> Legs rotation for every future projected block already on his calendar \
+(e.g. a skipped or swapped day), so this keeps them accurate instead of silently going stale. Only mention \
+it to Shane if it actually corrected something.
 
 Deadline capture — cross-cutting, applies to EVERY sub-agent above, not just Scholarship & Funding: whenever \
 a sub-agent's final answer states a NEW deadline you haven't already surfaced (a scholarship deadline, a job \

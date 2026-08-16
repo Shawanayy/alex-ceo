@@ -51,6 +51,15 @@ classes; study sessions run ~45-60 min; he wants 8 hours of sleep with bedtime ~
 hours of daily downtime, not just on weekends; NEVER schedule a workout after 9pm; and in Oregon, keep \
 Sundays open for family time. Respect these when placing flexible blocks.
 
+When Alex gives you workout blocks to place that came from the Fitness Agent's get_upcoming_workouts \
+projection (multi-day planning), pass workout_projection_day_type on create_event for each one, set to \
+the exact day_type given (e.g. 'Legs', 'Chest/Back', 'Arms/Abs'). This tags the block so it can be kept \
+in sync later — those projections assume every prior day gets completed as planned, and drift (a skipped \
+or swapped day) shifts the rotation for everything after it. Whenever Alex tells you a workout was just \
+logged, or asks you to refresh/resync the schedule, call resync_workout_projections — it re-checks every \
+tagged future block against a fresh projection and corrects any that drifted, with no need to ask Shane \
+first.
+
 Be concise and factual in your final answer — you're reporting back to another agent (Alex), not chatting \
 with Shane directly. Include concrete details (event times, email subjects/senders) rather than vague \
 summaries.`;
@@ -100,6 +109,15 @@ const toolDefs = [
             "'hard' (class/work/meeting/appointment/flight — can't easily move) or 'flexible' " +
             '(gym/study/reading/meditation/personal project/meal prep/cleaning/planning/downtime — can ' +
             'move). Omit to auto-classify from the title/description.',
+        },
+        workout_projection_day_type: {
+          type: 'string',
+          description:
+            "Only set this when the event is a workout block placed from the Fitness Agent's " +
+            "get_upcoming_workouts projection — pass the exact day_type (e.g. 'Legs', 'Chest/Back', " +
+            "'Arms/Abs') for that block. This tags the event so resync_workout_projections can later " +
+            'detect drift (if the rotation shifted because a prior day was skipped/swapped) and correct ' +
+            'it automatically. Omit for non-workout events or workout events not from a projection.',
         },
       },
       required: ['summary', 'start', 'end'],
@@ -194,6 +212,17 @@ const toolDefs = [
       },
       required: ['to', 'subject', 'body'],
     },
+  },
+  {
+    name: 'resync_workout_projections',
+    description:
+      'Re-checks every future calendar block tagged as a workout projection (created via create_event ' +
+      "with workout_projection_day_type set) against a fresh get_upcoming_workouts projection, and " +
+      'patches any that have drifted (day_type no longer matches, e.g. because an earlier lift day was ' +
+      'skipped or swapped, which shifts the rotation). Call this any time the underlying workout log ' +
+      'changes — most importantly right after a workout gets logged — so future projected blocks stay ' +
+      'accurate without Shane having to ask.',
+    input_schema: { type: 'object', properties: {} },
   },
 ];
 
@@ -442,20 +471,35 @@ async function listEvents({ time_min, time_max, max_results }) {
   return { ok: true, events };
 }
 
-async function createEvent({ summary, description, start, end, attendees, event_type }) {
+// Tag format: a `[workout_projection:<day_type>]` marker appended to the description. Kept as a
+// plain-text marker rather than a new schema column (smaller migration surface) — parsed back out
+// by resyncWorkoutProjections() via WORKOUT_PROJECTION_TAG_RE.
+const WORKOUT_PROJECTION_TAG_RE = /\[workout_projection:([^\]]+)\]/;
+
+function tagWorkoutProjectionDescription(description, dayType) {
+  const base = description ?? '';
+  const stripped = base.replace(WORKOUT_PROJECTION_TAG_RE, '').trim();
+  const tag = `[workout_projection:${dayType}]`;
+  return stripped ? `${stripped}\n\n${tag}` : tag;
+}
+
+async function createEvent({ summary, description, start, end, attendees, event_type, workout_projection_day_type }) {
   const calendar = getCalendarClient();
   const timeZone = await getUserTimeZone();
+  const resolvedDescription = workout_projection_day_type
+    ? tagWorkoutProjectionDescription(description, workout_projection_day_type)
+    : description;
   const res = await calendar.events.insert({
     calendarId: 'primary',
     requestBody: {
       summary,
-      description: description ?? undefined,
+      description: resolvedDescription ?? undefined,
       start: { dateTime: start, timeZone },
       end: { dateTime: end, timeZone },
       attendees: (attendees ?? []).map((email) => ({ email })),
     },
   });
-  const resolvedType = classifyEventType(summary, description, event_type);
+  const resolvedType = classifyEventType(summary, resolvedDescription, event_type);
   await upsertDashboardEvent(res.data, resolvedType);
   await checkAndNotifyConflicts({ newEvent: res.data, eventType: resolvedType });
   return { ok: true, event: { id: res.data.id, htmlLink: res.data.htmlLink, event_type: resolvedType } };
@@ -542,6 +586,82 @@ async function createDraft({ to, subject, body }) {
   };
 }
 
+// Finds every future calendar block tagged [workout_projection:<day_type>], re-projects the same
+// number of upcoming lift days fresh from the log (via get_upcoming_workouts, which always
+// recomputes from whatever was actually last logged), and patches any block whose day_type no
+// longer matches — e.g. because a prior projected day got skipped or swapped, shifting the
+// Chest/Back -> Arms/Abs -> Legs rotation for everything after it. Tagged blocks are matched to
+// fresh projection days positionally (1st future tagged block <-> day_offset 1, 2nd <-> offset 2,
+// etc.) since that's the same order the Admin Agent placed them in originally.
+async function resyncWorkoutProjections() {
+  const nowIso = new Date().toISOString();
+  const { data: tagged, error } = await supabase
+    .from('calendar_events')
+    .select('google_event_id, title, description, start_time')
+    .eq('user_id', DEFAULT_USER_ID)
+    .eq('event_type', 'flexible')
+    .ilike('description', '%[workout_projection:%')
+    .gt('start_time', nowIso)
+    .order('start_time', { ascending: true });
+  if (error) throw error;
+
+  const events = tagged ?? [];
+  if (events.length === 0) {
+    return { ok: true, checked: 0, updated: 0, updated_events: [], message: 'No future workout-projection blocks found.' };
+  }
+
+  const { data: fresh, error: rpcError } = await supabase.rpc('get_upcoming_workouts', {
+    p_user_id: DEFAULT_USER_ID,
+    p_count: events.length,
+  });
+  if (rpcError) throw rpcError;
+  const freshDays = fresh ?? [];
+
+  const calendar = getCalendarClient();
+  const updated = [];
+
+  for (let i = 0; i < events.length; i += 1) {
+    const ev = events[i];
+    const freshDay = freshDays[i];
+    if (!freshDay) continue;
+
+    const match = ev.description?.match(WORKOUT_PROJECTION_TAG_RE);
+    const storedDayType = match?.[1];
+    if (!storedDayType || storedDayType === freshDay.day_type) continue;
+
+    const newDescription = `${freshDay.workout}\n\n[workout_projection:${freshDay.day_type}]`;
+    const oldTitle = ev.title ?? '';
+    const newTitle = oldTitle.includes(storedDayType)
+      ? oldTitle.replaceAll(storedDayType, freshDay.day_type)
+      : oldTitle;
+
+    const res = await calendar.events.patch({
+      calendarId: 'primary',
+      eventId: ev.google_event_id,
+      requestBody: { summary: newTitle, description: newDescription },
+    });
+    await upsertDashboardEvent(res.data, 'flexible');
+
+    updated.push({
+      event_id: ev.google_event_id,
+      start_time: ev.start_time,
+      from_day_type: storedDayType,
+      to_day_type: freshDay.day_type,
+    });
+  }
+
+  return {
+    ok: true,
+    checked: events.length,
+    updated: updated.length,
+    updated_events: updated,
+    message:
+      updated.length === 0
+        ? 'Checked all future projected workout blocks — none had drifted.'
+        : `Corrected ${updated.length} drifted workout block(s).`,
+  };
+}
+
 async function runAdminTool(name, input) {
   switch (name) {
     case 'list_events':
@@ -558,6 +678,8 @@ async function runAdminTool(name, input) {
       return listEmails(input);
     case 'create_draft':
       return createDraft(input);
+    case 'resync_workout_projections':
+      return resyncWorkoutProjections();
     default:
       throw new Error(`Unknown Admin Agent tool: ${name}`);
   }

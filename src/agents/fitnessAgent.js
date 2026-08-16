@@ -37,6 +37,13 @@ get_todays_workout FIRST — it looks up the actual scheduled day (day_type + ph
 lifting program. If it returns workout data, report that plan back verbatim (day type and full exercise \
 list), don't guess, reconstruct, or infer it from logged history. Only fall back to reasoning from \
 list_workouts/get_workout_progress if get_todays_workout returns no data at all.
+- The rotation isn't calendar-based — it's driven by whatever Shane last actually logged (Chest/Back -> \
+Arms/Abs -> Legs -> repeat), so "what's my workout Saturday" has no fixed answer until it's computed. When \
+Alex asks for workouts covering MULTIPLE upcoming days (e.g. planning the rest of the week), call \
+get_upcoming_workouts with the number of days needed instead of guessing or calling get_todays_workout \
+repeatedly. Always report these as a PROJECTION — explicitly say it assumes each prior day gets completed \
+as planned, since a skipped or swapped day will shift everything after it. Never present projected days as \
+guaranteed fact.
 
 Be concise and factual in your final answer — you're reporting back to another agent (Alex), not chatting \
 with Shane directly. Always include concrete numbers (dates, counts, streaks) rather than vague summaries.`;
@@ -81,6 +88,22 @@ const toolDefs = [
       'exercise list). Use this whenever Shane asks what his workout is for today or what he should do next — ' +
       'report the result verbatim rather than guessing from logged history.',
     input_schema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'get_upcoming_workouts',
+    description:
+      "Project Shane's next N lift days forward (day type + phase + full exercise list each), starting from " +
+      "today's actual next lift day and continuing the Chest/Back -> Arms/Abs -> Legs rotation. This is a " +
+      'projection, not a fixed schedule — it assumes each prior projected day gets completed on schedule, ' +
+      'and always recomputes fresh from whatever was actually last logged. Use this for multi-day planning ' +
+      'requests instead of guessing future days yourself.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        count: { type: 'integer', description: 'How many upcoming lift days to project, e.g. 3' },
+      },
+      required: ['count'],
+    },
   },
 ];
 
@@ -157,6 +180,15 @@ async function getTodaysWorkout() {
   return { ok: true, ...data };
 }
 
+async function getUpcomingWorkouts({ count }) {
+  const { data, error } = await supabase.rpc('get_upcoming_workouts', {
+    p_user_id: DEFAULT_USER_ID,
+    p_count: count,
+  });
+  if (error) throw error;
+  return { ok: true, is_projection: true, days: data ?? [] };
+}
+
 async function runFitnessTool(name, input) {
   switch (name) {
     case 'log_workout':
@@ -167,6 +199,8 @@ async function runFitnessTool(name, input) {
       return getWorkoutProgress();
     case 'get_todays_workout':
       return getTodaysWorkout();
+    case 'get_upcoming_workouts':
+      return getUpcomingWorkouts(input);
     default:
       throw new Error(`Unknown Fitness Coach tool: ${name}`);
   }
