@@ -401,9 +401,10 @@ export const toolDefs = [
     name: 'delegate_to_fitness_agent',
     description:
       "Hand an exercise/workout request off to the Fitness Coach, a specialist sub-agent with real access " +
-      "to Shane's LifeOS dashboard workouts table. Use this for: logging a workout (or a skipped one), " +
-      'listing recent workouts, and progress/consistency questions (streaks, frequency, workout-type ' +
-      'breakdown). It gives plain factual feedback only, not personalized training/injury advice.',
+      "to Shane's LifeOS dashboard workouts table and mileage goal. Use this for: logging a workout (or a " +
+      'skipped one), logging a run/walk/hike/bike distance (updates the dashboard mileage goal, e.g. "Run ' +
+      '100 miles", too), listing recent workouts, and progress/consistency questions (streaks, frequency, ' +
+      'workout-type breakdown). It gives plain factual feedback only, not personalized training/injury advice.',
     input_schema: {
       type: 'object',
       properties: {

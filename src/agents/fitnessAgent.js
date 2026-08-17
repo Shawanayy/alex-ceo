@@ -30,8 +30,13 @@ consistency tracking stays honest.
 days, current consecutive-day streak, and a breakdown of workout_type frequency. Use it whenever Shane asks \
 "how am I doing" / for progress or a plan adjustment — base any suggestion strictly on what the data shows \
 (e.g. "you've logged legs 0 times in 3 weeks" is fine; a specific new program is not your call to make).
-- Shane may also have a "Hit 10,000 steps a day" or mileage-type habit/goal tracked separately by the Habit \
-Tracking Agent — that's a different system (dashboard goals), don't try to read or write it from here.
+- Shane may also have a "Hit 10,000 steps a day" habit tracked separately by the Habit Tracking Agent — that's \
+a different system (dashboard goals), don't try to read or write it from here.
+- Mileage goals (goal_type='Mileage' on the dashboard, e.g. "Run 100 miles") ARE yours to update. Whenever \
+Shane reports running, walking, hiking, or biking a distance, call log_mileage with the miles IN ADDITION to \
+log_workout — log_workout only records the workout itself, it does NOT touch the dashboard's mileage goal or \
+its checkmark/heatmap, so skipping log_mileage means the goal tracker silently falls out of sync with what \
+Shane actually did.
 - When Shane asks what his workout is for today (or "what should I do today" / "what's next"), call \
 get_todays_workout FIRST — it looks up the actual scheduled day (day_type + phase) from his structured \
 lifting program. If it returns workout data, report that plan back verbatim (day type and full exercise \
@@ -88,6 +93,22 @@ const toolDefs = [
       'exercise list). Use this whenever Shane asks what his workout is for today or what he should do next — ' +
       'report the result verbatim rather than guessing from logged history.',
     input_schema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'log_mileage',
+    description:
+      "Add distance (miles) toward Shane's dashboard mileage goal (e.g. 'Run 100 miles') for a given date — " +
+      "adds to that day's total and bumps the goal's overall progress, and marks the day done on the goal's " +
+      'checkmark/heatmap. Call this IN ADDITION to log_workout whenever Shane reports running, walking, ' +
+      'hiking, or biking a distance — log_workout alone does not update the mileage goal.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        miles: { type: 'number', description: 'Distance in miles to add, e.g. 1.74' },
+        date: { type: 'string', description: 'ISO date (YYYY-MM-DD), defaults to today' },
+      },
+      required: ['miles'],
+    },
   },
   {
     name: 'get_upcoming_workouts',
@@ -174,6 +195,50 @@ async function getWorkoutProgress() {
   };
 }
 
+async function findMileageGoal() {
+  const { data, error } = await supabase.from('goals').select('*').eq('goal_type', 'Mileage');
+  if (error) throw error;
+  if (!data || data.length === 0) return null;
+  return data.find((g) => g.pinned) || data[0];
+}
+
+async function logMileage({ miles, date }) {
+  const goal = await findMileageGoal();
+  if (!goal) return { ok: false, error: 'No Mileage-type goal found on the dashboard.' };
+
+  const logDate = date ?? (await todayLocal());
+
+  const { data: existingLog, error: existingErr } = await supabase
+    .from('goal_logs')
+    .select('value')
+    .eq('goal_id', goal.id)
+    .eq('date', logDate)
+    .maybeSingle();
+  if (existingErr) throw existingErr;
+
+  const newDayValue = (parseFloat(existingLog?.value) || 0) + miles;
+
+  const { error: logErr } = await supabase
+    .from('goal_logs')
+    .upsert({ goal_id: goal.id, date: logDate, done: true, value: newDayValue }, { onConflict: 'goal_id,date' });
+  if (logErr) throw logErr;
+
+  const newTotal = (parseFloat(goal.current_value) || 0) + miles;
+  const { error: goalErr } = await supabase.from('goals').update({ current_value: newTotal }).eq('id', goal.id);
+  if (goalErr) throw goalErr;
+
+  return {
+    ok: true,
+    goal_title: goal.title,
+    date: logDate,
+    miles_added: miles,
+    day_total: newDayValue,
+    goal_total: newTotal,
+    target: goal.target_value,
+    unit: goal.unit,
+  };
+}
+
 async function getTodaysWorkout() {
   const { data, error } = await supabase.rpc('get_todays_workout');
   if (error) throw error;
@@ -197,6 +262,8 @@ async function runFitnessTool(name, input) {
       return listWorkouts(input);
     case 'get_workout_progress':
       return getWorkoutProgress();
+    case 'log_mileage':
+      return logMileage(input);
     case 'get_todays_workout':
       return getTodaysWorkout();
     case 'get_upcoming_workouts':
