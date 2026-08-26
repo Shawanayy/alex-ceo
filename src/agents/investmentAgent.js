@@ -5,14 +5,14 @@ dotenv.config();
 import { supabase } from '../supabaseClient.js';
 import { alertToolDefs, setAlertRule, listAlertRules, deactivateAlertRule, evaluateRules, pushAlertNotifications } from '../alerts.js';
 import { getSheetsClient } from '../google/googleClient.js';
-import {
-  fmpQuote,
-  fmpHistoricalClose,
-  fmpKeyMetricsAndRatios,
-  fmpQuarterlyIncomeTrend,
-  fmpEarningsSurprises,
-  fmpStockNews,
-} from '../fmpClient.js';
+// FMP is NOT used here despite src/fmpClient.js existing — checked live, and FMP's free Basic
+// plan (a) 403s on all fundamentals/ratios/earnings-surprise endpoints (Starter plan, $22/mo,
+// required) and (b) appears to restrict several other datasets to a small sample-ticker list
+// (AAPL/TSLA/AMZN + ~84 more) per their pricing page, which wouldn't reliably cover Shane's
+// actual holdings (FSLR/IONQ/PSI are unlikely to be in that sample set). Shane chose to stay
+// free rather than pay for Starter, so this file gets fundamentals depth from Alpha Vantage's
+// OVERVIEW endpoint instead (already integrated below, already proven working on his real
+// tickers). fmpClient.js is left in place, unused, in case he upgrades FMP later.
 
 import { COMPLEX_MODEL } from '../modelTiers.js';
 
@@ -64,17 +64,20 @@ on top of them.
 If Alpha Vantage returns a rate-limit or error message, report that plainly (e.g. "hit today's API rate \
 limit") rather than inventing numbers.
 
-Deeper fundamentals (Financial Modeling Prep, a second live data source):
-- get_company_fundamentals: TTM margins, free cash flow per share, debt ratios, valuation, the last 4 \
-quarters of revenue/EPS (so growth direction is visible, not just one snapshot), and the most recent \
-earnings beat/miss. Use this over get_company_overview when Shane's question is really "is the business \
-actually getting better or worse," not just "what's the current snapshot."
+Deeper fundamentals (get_company_fundamentals, still Alpha Vantage — a richer read of the same OVERVIEW \
+endpoint get_company_overview uses): TTM gross/operating/net margins, ROA/ROE, EV/EBITDA (debt-inclusive \
+valuation proxy — free tier has no direct debt-to-equity field), and YoY revenue/EPS growth. Use this over \
+get_company_overview when Shane's question is really "is the business actually getting better or worse," not \
+just "what's the current snapshot." Shares the same 25-request/day budget as everything else here.
 
 You also power a fully automated daily briefing (see runDailyInvestmentBriefing, not something Shane calls \
 directly) that reads his real investment history from his STOCKS Google Sheet (read-only — you never write \
-to it) alongside live FMP data, and pushes a 6-section report to his notifications feed each morning. If \
-Shane asks about that briefing (e.g. "why didn't I get today's briefing", "what does the daily report cover"), \
-you can explain what it does, but you don't trigger it yourself — it runs on its own schedule.
+to it) alongside live Alpha Vantage data (price/fundamentals/sector trends/news), and pushes a 6-section \
+report to his notifications feed each morning. It uses roughly 16 of the shared 25 daily Alpha Vantage \
+requests to do this, so heads-up if Shane hits a rate limit on an interactive request later the same day — \
+that's why, not a bug. If Shane asks about the briefing (e.g. "why didn't I get today's briefing", "what does \
+the daily report cover"), you can explain what it does, but you don't trigger it yourself — it runs on its \
+own schedule.
 
 Important boundary: you are not a licensed financial advisor and must not give personalized buy/sell \
 investment advice or tell Shane what to do with his money. You CAN state plain facts — his portfolio's \
@@ -196,11 +199,10 @@ const toolDefs = [
   {
     name: 'get_company_fundamentals',
     description:
-      'Get deeper fundamentals for one ticker from Financial Modeling Prep — TTM margins (gross/operating/' +
-      'net), free cash flow per share, debt ratios, valuation (P/E, price-to-FCF), and the last few quarters ' +
-      'of revenue/EPS so growth direction is visible, plus the most recent earnings beat/miss. Richer than ' +
-      'get_company_overview (which is Alpha Vantage, single-snapshot) — use this one when Shane wants to ' +
-      'understand whether the actual business is improving or deteriorating, not just the current price.',
+      'Get deeper fundamentals for one ticker — TTM gross/operating/net margins, return on assets/equity, ' +
+      'EV/EBITDA (a debt-inclusive valuation proxy), and year-over-year revenue/EPS growth. Richer read of ' +
+      'the same Alpha Vantage data get_company_overview uses — use this one when Shane wants to understand ' +
+      'whether the actual business is improving or deteriorating, not just the current price/snapshot.',
     input_schema: {
       type: 'object',
       properties: { ticker: { type: 'string', description: "Stock ticker symbol, e.g. 'NVDA'" } },
@@ -229,6 +231,99 @@ async function alphaVantageRequest(params) {
     return { error: data.Note || data.Information || data['Error Message'] };
   }
   return { data };
+}
+
+// Richer fundamentals than get_company_overview parses today — same OVERVIEW endpoint, same one
+// API call, just reading more of the ~50 fields it already returns: TTM margins (gross/operating/
+// net), ROA/ROE, EV/EBITDA (a debt-inclusive valuation proxy — OVERVIEW has no direct debt-to-
+// equity field), and YoY revenue/EPS growth. This is the free-tier fundamentals depth used by
+// both get_company_fundamentals (on-demand) and the daily briefing (see fmpClient.js comment at
+// the top of this file for why FMP isn't used for this instead).
+async function fetchAvFundamentals(ticker) {
+  const { data, error } = await alphaVantageRequest({ function: 'OVERVIEW', symbol: ticker });
+  if (error) return { ok: false, error };
+  if (!data || Object.keys(data).length === 0) {
+    return { ok: false, error: `No fundamentals data returned for '${ticker}'.` };
+  }
+  const num = (v) => (v === undefined || v === null || v === 'None' ? null : Number(v));
+  const grossProfit = num(data.GrossProfitTTM);
+  const revenue = num(data.RevenueTTM);
+  return {
+    ok: true,
+    ticker: data.Symbol,
+    market_cap: num(data.MarketCapitalization),
+    pe_ratio: num(data.PERatio),
+    ev_to_ebitda: num(data.EVToEBITDA),
+    gross_margin_ttm_pct: grossProfit !== null && revenue ? (grossProfit / revenue) * 100 : null,
+    operating_margin_ttm_pct: num(data.OperatingMarginTTM) !== null ? num(data.OperatingMarginTTM) * 100 : null,
+    net_profit_margin_pct: num(data.ProfitMargin) !== null ? num(data.ProfitMargin) * 100 : null,
+    return_on_assets_ttm_pct: num(data.ReturnOnAssetsTTM) !== null ? num(data.ReturnOnAssetsTTM) * 100 : null,
+    return_on_equity_ttm_pct: num(data.ReturnOnEquityTTM) !== null ? num(data.ReturnOnEquityTTM) * 100 : null,
+    quarterly_revenue_growth_yoy_pct:
+      num(data.QuarterlyRevenueGrowthYOY) !== null ? num(data.QuarterlyRevenueGrowthYOY) * 100 : null,
+    quarterly_earnings_growth_yoy_pct:
+      num(data.QuarterlyEarningsGrowthYOY) !== null ? num(data.QuarterlyEarningsGrowthYOY) * 100 : null,
+    analyst_target_price: data.AnalystTargetPrice && data.AnalystTargetPrice !== 'None' ? num(data.AnalystTargetPrice) : null,
+    week_52_high: num(data['52WeekHigh']),
+    week_52_low: num(data['52WeekLow']),
+    note_on_gaps:
+      'Free-tier data (Alpha Vantage OVERVIEW) has no direct free cash flow or debt-to-equity field — ' +
+      'EV/EBITDA and ROA/ROE stand in as debt/efficiency proxies. Upgrading FMP to its Starter plan ' +
+      '($22/mo) would add those directly if ever wanted.',
+  };
+}
+
+// One call, two uses: current price + day change (computed from the two most recent closes,
+// same accuracy as a live quote for a once-daily job) AND ~1-week-ago / ~1-month-ago closes for
+// trend comparison, all from a single TIME_SERIES_DAILY payload instead of three separate calls
+// — matters because Alpha Vantage's free tier is a shared 25 requests/day budget across every
+// tool this agent has.
+async function fetchAvDailySeries(ticker) {
+  const { data, error } = await alphaVantageRequest({
+    function: 'TIME_SERIES_DAILY',
+    symbol: ticker,
+    outputsize: 'compact', // last ~100 trading days — plenty for a 30-day lookback
+  });
+  if (error) return { ok: false, error };
+  const series = data?.['Time Series (Daily)'];
+  if (!series) return { ok: false, error: `No daily price series returned for '${ticker}'.` };
+
+  const dates = Object.keys(series).sort((a, b) => (a < b ? 1 : -1)); // newest first
+  const closeOn = (idx) => (dates[idx] ? Number(series[dates[idx]]['4. close']) : null);
+
+  const latestClose = closeOn(0);
+  const prevClose = closeOn(1);
+  const weekAgoClose = closeOn(5); // ~5 trading days ≈ 1 calendar week
+  const monthAgoClose = closeOn(21); // ~21 trading days ≈ 1 calendar month
+
+  return {
+    ok: true,
+    ticker,
+    date: dates[0] ?? null,
+    price: latestClose,
+    day_change_pct:
+      latestClose !== null && prevClose ? ((latestClose - prevClose) / prevClose) * 100 : null,
+    close_7_days_ago: weekAgoClose,
+    week_change_pct:
+      latestClose !== null && weekAgoClose ? ((latestClose - weekAgoClose) / weekAgoClose) * 100 : null,
+    close_30_days_ago: monthAgoClose,
+    month_change_pct:
+      latestClose !== null && monthAgoClose ? ((latestClose - monthAgoClose) / monthAgoClose) * 100 : null,
+  };
+}
+
+// Sector-level performance (real-time-ish, 1-day, and 1-month rank groups) — one call, covers
+// every sector, used for the daily briefing's Market/Industry Trends section rather than
+// anything ticker-specific.
+async function fetchSectorPerformance() {
+  const { data, error } = await alphaVantageRequest({ function: 'SECTOR' });
+  if (error) return { ok: false, error };
+  return {
+    ok: true,
+    one_day_performance: data?.['Rank B: Day Performance'] ?? null,
+    one_month_performance: data?.['Rank D: Month Performance'] ?? null,
+    year_to_date_performance: data?.['Rank F: Year-to-Date (YTD) Performance'] ?? null,
+  };
 }
 
 async function fetchHoldings() {
@@ -468,22 +563,9 @@ async function getPortfolioDailyMovers() {
 }
 
 async function getCompanyFundamentals({ ticker }) {
-  const [metrics, incomeTrend, earnings] = await Promise.all([
-    fmpKeyMetricsAndRatios(ticker),
-    fmpQuarterlyIncomeTrend(ticker, 4),
-    fmpEarningsSurprises(ticker, 2),
-  ]);
-  if (!metrics.ok && !incomeTrend.ok && !earnings.ok) {
-    return { ok: false, error: metrics.error || incomeTrend.error || earnings.error || `No FMP data for '${ticker}'.` };
-  }
-  return {
-    ok: true,
-    source: 'Financial Modeling Prep',
-    ticker,
-    fundamentals_ttm: metrics.ok ? metrics : null,
-    quarterly_trend: incomeTrend.ok ? incomeTrend.quarters : null,
-    recent_earnings_surprises: earnings.ok ? earnings.surprises : null,
-  };
+  const fundamentals = await fetchAvFundamentals(ticker);
+  if (!fundamentals.ok) return fundamentals;
+  return { ...fundamentals, source: 'Alpha Vantage OVERVIEW (free tier)' };
 }
 
 async function checkAlertRules() {
@@ -652,38 +734,35 @@ The 1-2 most important things Shane should know today. If truly nothing rises to
 Notable price movements or developments in his actual holdings.
 
 📊 *Fundamental Changes*
-Notable changes in company financials/valuation (margins, FCF, debt, revenue/EPS growth, earnings results) \
-for his holdings.
+Notable changes in company financials/valuation (margins, ROA/ROE, EV/EBITDA, revenue/EPS growth) for his \
+holdings.
 
 🌎 *Market/Industry Trends*
-Broader trends that could affect his holdings.
+Broader trends that could affect his holdings — draw on the sector performance and general market news data \
+provided, not just his own tickers.
 
 ⚠️ *Risks*
 Anything that deserves watching.
 
 👀 *Watchlist*
-Stocks/companies/sectors/trends worth monitoring going forward (not necessarily urgent today).`;
+Stocks/companies/sectors/trends worth monitoring going forward (not necessarily urgent today) — this is where \
+sector-level movers and macro/general-market news that don't touch his current holdings directly still belong, \
+if they're relevant to where his money is or could plausibly go.
+
+Data note: fundamentals here are free-tier Alpha Vantage (no direct free cash flow or debt-to-equity field — \
+EV/EBITDA and ROA/ROE stand in as proxies). Don't apologize for this repeatedly in the report; state figures \
+plainly and only note a genuine gap where it actually changes what you can say.`;
 
 async function fetchTickerMarketData(ticker) {
-  const [quote, weekAgo, monthAgo, fundamentals, quarterlyTrend, earnings, news] = await Promise.all([
-    fmpQuote(ticker),
-    fmpHistoricalClose(ticker, 7),
-    fmpHistoricalClose(ticker, 30),
-    fmpKeyMetricsAndRatios(ticker),
-    fmpQuarterlyIncomeTrend(ticker, 4),
-    fmpEarningsSurprises(ticker, 2),
-    fmpStockNews(ticker, 3),
+  const [series, fundamentals] = await Promise.all([
+    fetchAvDailySeries(ticker),
+    fetchAvFundamentals(ticker),
   ]);
 
   return {
     ticker,
-    quote: quote.ok ? quote : null,
-    close_7_days_ago: weekAgo.ok ? weekAgo : null,
-    close_30_days_ago: monthAgo.ok ? monthAgo : null,
-    fundamentals_ttm: fundamentals.ok ? fundamentals : null,
-    quarterly_trend: quarterlyTrend.ok ? quarterlyTrend.quarters : null,
-    recent_earnings_surprises: earnings.ok ? earnings.surprises : null,
-    recent_news: news.ok ? news.articles : null,
+    price_and_trend: series.ok ? series : null,
+    fundamentals: fundamentals.ok ? fundamentals : null,
   };
 }
 
@@ -691,11 +770,19 @@ async function fetchTickerMarketData(ticker) {
 // backgroundLoop.js once/day (see the dedup-by-day check there). Returns a small result object
 // for logging rather than throwing on partial data — a briefing with some missing fields is
 // still worth sending; only a total failure to produce any text should be treated as an error.
+//
+// API budget note: this uses 2 Alpha Vantage calls per distinct holding (daily series +
+// fundamentals) plus 2 for market-wide context (sector performance + general news) — for Shane's
+// current 7 holdings that's ~16 of the shared 25/day free-tier budget in one run. Deliberately
+// skips per-ticker news (would add 1 more call per holding) in favor of the one general-market
+// news call; ticker-specific news still surfaces in that feed by name often enough to be useful.
 export async function runDailyInvestmentBriefing() {
-  const [holdingsRaw, sheetHistory, summaryResult] = await Promise.all([
+  const [holdingsRaw, sheetHistory, summaryResult, sectorPerformance, marketNews] = await Promise.all([
     fetchHoldings(),
     fetchSheetHistory(),
     getPortfolioSummary(),
+    fetchSectorPerformance(),
+    getMarketNews({ limit: 8 }),
   ]);
 
   const holdings = holdingsRaw.map(withGain);
@@ -712,6 +799,10 @@ export async function runDailyInvestmentBriefing() {
     current_holdings: holdings,
     investment_history_from_sheet: sheetHistory,
     live_market_and_fundamentals_by_ticker: marketData,
+    market_wide_context: {
+      sector_performance: sectorPerformance.ok ? sectorPerformance : null,
+      general_market_news: marketNews.ok ? marketNews.articles : null,
+    },
   };
 
   const userMessage =
