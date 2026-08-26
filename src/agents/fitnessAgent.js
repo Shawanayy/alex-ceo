@@ -5,8 +5,11 @@ dotenv.config();
 import { supabase } from '../supabaseClient.js';
 import { todayLocal } from '../utils/localDate.js';
 
+import { SIMPLE_MODEL } from '../modelTiers.js';
+
+import { fetchAgentMemories, formatCorrectionsBlock } from '../memoryScope.js';
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-const MODEL = process.env.ALEX_MODEL || 'claude-sonnet-5';
+const MODEL = SIMPLE_MODEL; // pure CRUD/logging agent — no complex judgment needed
 const DEFAULT_USER_ID = process.env.DEFAULT_USER_ID;
 
 const SYSTEM_PROMPT = `You are the Fitness Coach, a specialist sub-agent that Alex (Shane Pinho's Chief of \
@@ -42,13 +45,24 @@ get_todays_workout FIRST — it looks up the actual scheduled day (day_type + ph
 lifting program. If it returns workout data, report that plan back verbatim (day type and full exercise \
 list), don't guess, reconstruct, or infer it from logged history. Only fall back to reasoning from \
 list_workouts/get_workout_progress if get_todays_workout returns no data at all.
-- The rotation isn't calendar-based — it's driven by whatever Shane last actually logged (Chest/Back -> \
-Arms/Abs -> Legs -> repeat), so "what's my workout Saturday" has no fixed answer until it's computed. When \
-Alex asks for workouts covering MULTIPLE upcoming days (e.g. planning the rest of the week), call \
-get_upcoming_workouts with the number of days needed instead of guessing or calling get_todays_workout \
-repeatedly. Always report these as a PROJECTION — explicitly say it assumes each prior day gets completed \
-as planned, since a skipped or swapped day will shift everything after it. Never present projected days as \
-guaranteed fact.
+- The rotation isn't calendar-based — it's driven by Shane's total logged lift-day count, not a lookup of \
+what he last did, so it's naturally tolerant of missed days (a skipped day just isn't logged; it doesn't \
+break or shift anything). The 5-day cycle is Chest/Back -> Arms/Abs -> Chest/Back -> Arms/Abs -> Legs -> \
+repeat (Legs lands every 2 upper-body cycles). "What's my workout Saturday" has no fixed answer until it's \
+computed. When Alex asks for workouts covering MULTIPLE upcoming days (e.g. planning the rest of the week), \
+call get_upcoming_workouts with the number of days needed instead of guessing or calling get_todays_workout \
+repeatedly. Report these as a PROJECTION (things shift if a day gets skipped or done out of order), but keep \
+that framing light and factual — not a warning. Never present projected days as guaranteed fact.
+- Lifting and running are LOW-PRIORITY for Shane, not something to run his life around. He wants flexibility \
+when he misses a lift or run — no guilt-tripping, no "you're behind," no pressure to catch up or make up a \
+missed day. If he skipped something, just log it plainly (or don't log it at all) and move on; only mention \
+consistency trends if he explicitly asks "how am I doing." Never proactively flag missed workouts as a problem.
+- Shane also has a HelioStrip wearable (Amazfit Helio Strap) auto-syncing recovery data — resting heart rate, \
+HRV, SpO2, VO2max, stress score, steps, and sleep stage breakdown — into wearable_daily_metrics and \
+wearable_sleep_sessions. Call get_recovery_snapshot when Shane asks about recovery, HRV, sleep quality, resting \
+heart rate, or whether he's in shape to train hard today. This is separate from the manual sleep_logs table and \
+from the lifting program — it's real sensor data, so report the numbers plainly rather than interpreting them \
+as medical advice. If it returns no data, say the wearable hasn't synced recently rather than guessing.
 
 Be concise and factual in your final answer — you're reporting back to another agent (Alex), not chatting \
 with Shane directly. Always include concrete numbers (dates, counts, streaks) rather than vague summaries.`;
@@ -114,7 +128,8 @@ const toolDefs = [
     name: 'get_upcoming_workouts',
     description:
       "Project Shane's next N lift days forward (day type + phase + full exercise list each), starting from " +
-      "today's actual next lift day and continuing the Chest/Back -> Arms/Abs -> Legs rotation. This is a " +
+      "today's actual next lift day and continuing the Chest/Back -> Arms/Abs -> Chest/Back -> Arms/Abs -> " +
+      "Legs rotation. This is a " +
       'projection, not a fixed schedule — it assumes each prior projected day gets completed on schedule, ' +
       'and always recomputes fresh from whatever was actually last logged. Use this for multi-day planning ' +
       'requests instead of guessing future days yourself.',
@@ -126,6 +141,15 @@ const toolDefs = [
       required: ['count'],
     },
   },
+  {
+    name: 'get_recovery_snapshot',
+    description:
+      "Get Shane's latest synced HelioStrip wearable data: resting heart rate, HRV, SpO2, VO2max, stress " +
+      'score, steps, and last night\'s sleep (duration + deep/REM/light minutes + sleep score). Use whenever ' +
+      'Shane asks about recovery, HRV, sleep quality, resting heart rate, or readiness to train.',
+    input_schema: { type: 'object', properties: {} },
+  cache_control: { type: 'ephemeral' },
+    },
 ];
 
 async function logWorkout({ date, workout_type, notes, completed }) {
@@ -254,6 +278,58 @@ async function getUpcomingWorkouts({ count }) {
   return { ok: true, is_projection: true, days: data ?? [] };
 }
 
+async function getRecoverySnapshot() {
+  const [{ data: metricsRows, error: metricsErr }, { data: sleepRows, error: sleepErr }] = await Promise.all([
+    supabase
+      .from('wearable_daily_metrics')
+      .select('*')
+      .eq('user_id', DEFAULT_USER_ID)
+      .order('date', { ascending: false })
+      .limit(1),
+    supabase
+      .from('wearable_sleep_sessions')
+      .select('*')
+      .eq('user_id', DEFAULT_USER_ID)
+      .order('date', { ascending: false })
+      .limit(1),
+  ]);
+  if (metricsErr) throw metricsErr;
+  if (sleepErr) throw sleepErr;
+
+  const metrics = metricsRows?.[0] ?? null;
+  const sleep = sleepRows?.[0] ?? null;
+
+  if (!metrics && !sleep) {
+    return { ok: true, has_data: false };
+  }
+
+  return {
+    ok: true,
+    has_data: true,
+    date: metrics?.date ?? sleep?.date,
+    resting_hr: metrics?.resting_hr ?? null,
+    hrv_ms: metrics?.hrv_ms ?? null,
+    spo2: metrics?.spo2 ?? null,
+    vo2max: metrics?.vo2max ?? null,
+    stress_score: metrics?.stress_score ?? null,
+    steps: metrics?.steps ?? null,
+    active_calories: metrics?.active_calories ?? null,
+    sleep: sleep
+      ? {
+          date: sleep.date,
+          total_min: sleep.total_min,
+          deep_min: sleep.deep_min,
+          rem_min: sleep.rem_min,
+          light_min: sleep.light_min,
+          awake_min: sleep.awake_min,
+          sleep_score: sleep.sleep_score,
+          bedtime: sleep.bedtime,
+          wake_time: sleep.wake_time,
+        }
+      : null,
+  };
+}
+
 async function runFitnessTool(name, input) {
   switch (name) {
     case 'log_workout':
@@ -268,6 +344,8 @@ async function runFitnessTool(name, input) {
       return getTodaysWorkout();
     case 'get_upcoming_workouts':
       return getUpcomingWorkouts(input);
+    case 'get_recovery_snapshot':
+      return getRecoverySnapshot();
     default:
       throw new Error(`Unknown Fitness Coach tool: ${name}`);
   }
@@ -281,12 +359,20 @@ export async function runFitnessAgent(request) {
   let finalText = null;
   let guard = 0;
 
+  const scopedMemories = await fetchAgentMemories('fitness_agent');
+  const correctionsBlock = formatCorrectionsBlock(scopedMemories);
+  const system = [
+    { type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } },
+    ...(correctionsBlock ? [{ type: 'text', text: correctionsBlock }] : []),
+  ];
+
+
   while (finalText === null && guard < 6) {
     guard += 1;
     const response = await anthropic.messages.create({
       model: MODEL,
       max_tokens: 1024,
-      system: SYSTEM_PROMPT,
+      system,
       tools: toolDefs,
       messages,
     });

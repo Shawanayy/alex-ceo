@@ -2,24 +2,26 @@ import Anthropic from '@anthropic-ai/sdk';
 import dotenv from 'dotenv';
 dotenv.config();
 
-import { toolDefs, runTool, logError, fetchMemories } from './tools.js';
+import { toolDefs, runTool, logError, fetchMemories, logAgentRun } from './tools.js';
 import { getCurrentDateTimeContext } from './utils/localDate.js';
+import { SIMPLE_MODEL } from './modelTiers.js';
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-const MODEL = process.env.ALEX_MODEL || 'claude-sonnet-5';
+// Orchestrator is a fixed routing decision tree, not open-ended judgment — stays on the cheap
+// tier. Revisit via the agent_logs usage data if misrouting shows up.
+const MODEL = SIMPLE_MODEL;
 
-async function buildSystemPrompt(memories) {
-  const dateTimeContext = await getCurrentDateTimeContext();
-  const memoryBlock = memories.length
-    ? memories.map((m) => `- (${m.memory_type}, importance ${m.importance}) ${m.content}`).join('\n')
-    : '(no memories saved yet)';
-
-  return `You are Alex, Shane Pinho's Chief of Staff. You are reachable on Telegram and your job is to \
+// Everything below is 100% static across every call this process makes — this is what gets
+// cache_control'd as one block so the ~270-line routing rulebook is only paid for in full once,
+// not on every one of the up to 6 loop iterations per Telegram message. Date/time and Shane's
+// memories change per-call, so they're built separately in buildDynamicContext() and appended as
+// a second, uncached system block instead of being interpolated into this text.
+const STATIC_PROMPT_BODY = `You are Alex, Shane Pinho's Chief of Staff. You are reachable on Telegram and your job is to \
 be genuinely useful and honest about what you can and can't do — never pretend to do something you \
 don't actually have a tool for.
 
-${dateTimeContext}. Use this for any relative-time reasoning ("today", "tomorrow", "in 2 hours", \
-"this week") — never ask Shane what time it is, you already know.
+Use the current-time context provided separately below for any relative-time reasoning ("today", \
+"tomorrow", "in 2 hours", "this week") — never ask Shane what time it is, you already know.
 
 What you CAN currently do (Phase 2 — Admin Agent + Learning & Career Agent + Career Coach + Resume & Portfolio Agent + Skill Development Agent + Scholarship & Funding Agent + Budgeting Agent + Bill Pay Agent + Net Worth Tracker Agent + Investment Analyst Agent + Tax Prep Agent + Subscription Monitoring Agent + Credit Score Monitoring Agent + Fitness Coach + Nutrition Coach + Sleep Coach + Medical Records Agent + Habit Tracking Agent + Appointment Coordinator + Mental Wellness Agent + Travel Planner + Shopping Agent + Home Maintenance Agent + Entertainment Planner + Gift Planner + Event Planner + Personal Concierge + QA / Review Agent + Memory Agent + Automation Agent + Security & Privacy Agent + Data Analytics Agent + Notification Manager + n8n LifeOS capture online):
 - Have a normal conversation and help Shane think things through.
@@ -44,7 +46,10 @@ just within Alex, not when he's giving you a normal todo.
 - Remember durable facts/preferences/routines about Shane himself (remember) — how he likes to work, \
 recurring context — NOT dashboard items like todos/goals/finance/coursework, which go through trigger_n8n \
 or the Learning & Career Agent. You'll see the most important remembered facts listed below every \
-conversation.
+conversation. If instead Shane is correcting how ONE SPECIFIC sub-agent behaved (e.g. "stop logging my \
+runs as Legs day" to the Fitness Coach), call remember with agent_scope set to that sub-agent's name (e.g. \
+'fitness_agent') instead of a general fact — that sub-agent pulls its own corrections directly on its next \
+run, so the fix actually sticks instead of relying on you to repeat it in every future handoff.
 - Keep Shane's stored timezone current (set_timezone) — he splits time between Hawaii and Oregon, and \
 everything date-sensitive (nutrition/fitness/sleep/habit/mood "today" and daily totals, and what timezone \
 bare meeting times get created in on his Calendar) reads from this one value. Call set_timezone \
@@ -119,20 +124,30 @@ check/create actual Google Calendar events, read email, and create email drafts.
 wants something actually done in Calendar or Gmail (e.g. "put a meeting on my calendar Tuesday at 3", \
 "check my inbox", "draft an email to X"). It can NEVER send email itself; if Shane wants something sent, \
 the Admin Agent will create a draft and Shane sends it himself from Gmail. Be upfront about that limit \
-rather than implying the email went out. For proactive scheduling requests ("plan my day/week", "schedule my workouts and study time", "block time \
+rather than implying the email went out. For proactive scheduling requests ("plan my day/week", "schedule my study time", "block time \
 for studying", "lock out/fill in time on my calendar") — the Admin Agent only has calendar tools, it has NO \
-visibility into Shane's actual saved workout program or coursework, so calling it directly produces generic \
-placeholder blocks ("Workout", "Study"), not real ones. Instead: FIRST call delegate_to_fitness_agent to \
-get the specific workouts actually programmed for the relevant days, and delegate_to_learning_agent to get \
-the specific assignments/classes that need study time, THEN call delegate_to_admin_agent with a request \
-that names the concrete items you just gathered (exact workout names, exact class/assignment names) plus \
-any downtime Shane asked for, so it places real events around his existing hard commitments instead of \
-vague placeholders. For anything covering MORE than just today (planning the rest of the week, several \
-upcoming lift days, etc.), tell the Fitness Coach to use get_upcoming_workouts rather than repeated \
-single-day lookups, and pass its day_type for each projected day straight through to the Admin Agent so \
-it tags each block accordingly (workout_projection_day_type on create_event) — these are a rolling \
-projection that assumes each prior day gets completed as planned, not a fixed schedule, so say so when \
-reporting back to Shane. Skip the gather step only when the request is already fully concrete (e.g. "put a \
+visibility into Shane's actual saved coursework, so calling it directly produces generic placeholder blocks \
+("Study"), not real ones. Instead: FIRST call delegate_to_learning_agent to get the specific assignments/ \
+classes that need study time, THEN call delegate_to_admin_agent with a request that names the concrete items \
+you just gathered (exact class/assignment names), so it places real events around his existing hard \
+commitments instead of vague placeholders. A generic "plan my day/week" request covers study/chores ONLY — \
+do NOT ask the Admin Agent to block out "downtime" or personal/unscheduled time as its own calendar event \
+unless Shane explicitly asks for that; downtime is something to leave open, not something to create an \
+event for. Workouts and runs are also low-priority for Shane and are NEVER included in a \
+generic plan-my-week gather, even though a lift day may technically be next in the rotation. Only pull \
+delegate_to_fitness_agent into a scheduling request when Shane's message explicitly names a workout/lift/run \
+by word (e.g. "schedule my Legs day", "plan my week and put my runs on the calendar", "fit my workouts in \
+too") — if he didn't say the word, don't go get workout data at all. When he DOES ask for workouts/runs to be \
+scheduled, get the specific day_type(s) from the Fitness Coach and pass the day_type ONLY (e.g. "Legs", \
+"Chest/Back") through to the Admin Agent — not the exercise breakdown; that's also all the event title should \
+show. For anything covering MORE than just today (planning the rest of the week, several upcoming lift days, \
+etc.), tell the Fitness Coach to use get_upcoming_workouts rather than repeated single-day lookups, and pass \
+its day_type for each projected day straight through to the Admin Agent so it tags each block accordingly \
+(workout_projection_day_type on create_event) — these are a rolling projection that assumes each prior day \
+gets completed as planned, not a fixed schedule, so say so when reporting back to Shane. "Plan my week" means \
+the next 7 days starting today (today through 6 days out), matching what he sees on his dashboard's week view \
+— never project further than that unless Shane names a longer span himself (e.g. "plan the next two weeks"). \
+Skip the gather step(s) entirely when the request is already fully concrete (e.g. "put a \
 meeting on my calendar Tuesday at 3" needs no fitness/learning lookup). The Admin Agent also auto-detects \
 when a new hard commitment overlaps an existing flexible block (workout/study/etc.) and pushes Shane a \
 conflict notification with alternate times on its own — you don't need to check for that yourself. If \
@@ -234,9 +249,11 @@ Workout projection resync — cross-cutting, applies whenever delegate_to_fitnes
 workout (or an explicitly skipped one) — including a plain "I did legs today" type message, not just \
 explicit "log this" requests: immediately afterward, also call delegate_to_admin_agent asking it to run \
 resync_workout_projections. Do this automatically, without waiting for Shane to ask — logging a workout can \
-shift the Chest/Back -> Arms/Abs -> Legs rotation for every future projected block already on his calendar \
-(e.g. a skipped or swapped day), so this keeps them accurate instead of silently going stale. Only mention \
-it to Shane if it actually corrected something.
+shift the Chest/Back -> Arms/Abs -> Chest/Back -> Arms/Abs -> Legs rotation for every future projected block \
+already on his calendar (e.g. a skipped or swapped day), so this keeps them accurate instead of silently \
+going stale. This is routine bookkeeping, not something to make a big deal of — only mention it to Shane if \
+it actually corrected something, and even then keep it to a brief factual note, not a "you fell behind" \
+framing. Workouts/runs are low-priority for him; missed days are a non-issue.
 
 Deadline capture — cross-cutting, applies to EVERY sub-agent above, not just Scholarship & Funding: whenever \
 a sub-agent's final answer states a NEW deadline you haven't already surfaced (a scholarship deadline, a job \
@@ -256,7 +273,18 @@ anything in Research that isn't a simple dashboard capture. Note: proactive urge
 reach Shane on Telegram automatically via the background loop — that's real, not a gap.
 
 Tone: direct, warm, concise — like a competent chief of staff, not a chatbot. Don't pad answers with \
-unnecessary caveats, but never claim a capability you don't have.
+unnecessary caveats, but never claim a capability you don't have.`;
+
+// The only two things that change call-to-call: current date/time and Shane's top memories.
+// Kept as a separate, uncached system block appended after STATIC_PROMPT_BODY — small, cheap to
+// resend every time, and never worth caching since it's expected to differ on most calls anyway.
+async function buildDynamicContext(memories) {
+  const dateTimeContext = await getCurrentDateTimeContext();
+  const memoryBlock = memories.length
+    ? memories.map((m) => `- (${m.memory_type}, importance ${m.importance}) ${m.content}`).join('\n')
+    : '(no memories saved yet)';
+
+  return `Current time context: ${dateTimeContext}.
 
 Known memories about Shane (most important first):
 ${memoryBlock}`;
@@ -266,9 +294,29 @@ ${memoryBlock}`;
 const history = [];
 const MAX_TURNS = 20;
 
+// Matches "plan my day/week", "schedule my workouts", "block time for studying", "lock in my
+// calendar", etc. The SYSTEM_PROMPT already tells the model to actually create events for these
+// instead of describing a plan — but that's prompt discipline, not a guarantee. Shane hit exactly
+// this failure ("plan my week" came back as a text table, nothing created). The loop below uses
+// this to refuse a text-only answer until real delegation has happened at least once this turn.
+const PROACTIVE_SCHEDULING_RE =
+  /\bplan\b.{0,15}\b(day|week|schedule)\b|\bschedule\b.{0,20}\b(workouts?|lifts?|study|time)\b|\bblock\b.{0,10}\b(out|off)?\s*time\b|\block (in|out)\b.{0,20}\bcalendar\b|\bfill in\b.{0,15}\b(calendar|time)\b/i;
+
+// Catches the OTHER way a scheduling request can dodge actually creating events: gathering real
+// data (workouts, classes, existing calendar) via tools, then ending the turn by asking Shane to
+// pick times or confirm before placing anything — exactly what happened with "plan my week"
+// ("Want me to calendar this? ... once you tell me your preference for each day"). Shane wants
+// events placed automatically, reviewable/editable on the calendar after, never gated on a reply.
+const CONFIRMATION_SEEKING_RE =
+  /want me to\b|\bshould i\b|\bshall i\b|\bdo you want\b|\blet me know\b|\byour preference\b|\bonce you (tell|confirm|let)|\bwhich time\b|morning vs\.?\s*evening|\btell me your\b/i;
+
 export async function handleMessage(userText, telegramMessageId) {
   const memories = await fetchMemories();
-  const system = await buildSystemPrompt(memories);
+  const dynamicContext = await buildDynamicContext(memories);
+  const system = [
+    { type: 'text', text: STATIC_PROMPT_BODY, cache_control: { type: 'ephemeral' } },
+    { type: 'text', text: dynamicContext },
+  ];
 
   history.push({ role: 'user', content: userText });
   if (history.length > MAX_TURNS) history.splice(0, history.length - MAX_TURNS);
@@ -276,6 +324,14 @@ export async function handleMessage(userText, telegramMessageId) {
   let messages = [...history];
   let finalText = null;
   let guard = 0;
+  let usedAnyTool = false;
+  const isSchedulingIntent = PROACTIVE_SCHEDULING_RE.test(userText);
+
+  // Observability accumulators — one agent_logs row gets written for the whole turn once it
+  // finishes, not per loop iteration (see logAgentRun in tools.js).
+  const startedAt = Date.now();
+  const usageTotal = { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 };
+  const toolsCalledSet = new Set();
 
   try {
     while (finalText === null && guard < 6) {
@@ -290,15 +346,52 @@ export async function handleMessage(userText, telegramMessageId) {
 
       const toolUses = response.content.filter((b) => b.type === 'tool_use');
 
+      if (response.usage) {
+        usageTotal.input_tokens += response.usage.input_tokens ?? 0;
+        usageTotal.output_tokens += response.usage.output_tokens ?? 0;
+        usageTotal.cache_read_input_tokens += response.usage.cache_read_input_tokens ?? 0;
+        usageTotal.cache_creation_input_tokens += response.usage.cache_creation_input_tokens ?? 0;
+      }
+      toolUses.forEach((u) => toolsCalledSet.add(u.name));
+
       if (toolUses.length === 0) {
-        finalText = response.content
+        const candidateText = response.content
           .filter((b) => b.type === 'text')
           .map((b) => b.text)
           .join('\n')
           .trim();
+
+        // Refuse to hand Shane a text-only answer to a proactive scheduling request in either
+        // failure mode: (a) no delegation happened at all, or (b) it gathered real data but then
+        // stopped to ask him to pick times / confirm instead of just placing the events. Push a
+        // corrective nudge back and loop instead of accepting it as final. Bounded by the same
+        // guard<6 cap as everything else, so this can't loop forever.
+        const noToolsYet = !usedAnyTool;
+        const askedForConfirmation = usedAnyTool && CONFIRMATION_SEEKING_RE.test(candidateText);
+        if (isSchedulingIntent && (noToolsYet || askedForConfirmation) && guard < 6) {
+          messages.push({ role: 'assistant', content: response.content });
+          messages.push({
+            role: 'user',
+            content: noToolsYet
+              ? "Don't just describe the plan in text — actually create the calendar events now. " +
+                'Call delegate_to_learning_agent if study time is involved (and delegate_to_fitness_agent ' +
+                'ONLY if Shane explicitly named a workout/lift/run in his request) to get the real items, ' +
+                'then delegate_to_admin_agent to place them on the calendar via find_open_slots + ' +
+                'create_event, before replying to Shane. Do not add workout/run blocks he did not ask for.'
+              : "Don't ask which times he wants or whether to go ahead — decide the times yourself " +
+                'using his stated scheduling defaults (after-work first for lifts, mornings for ' +
+                'runs, etc.) and call delegate_to_admin_agent to actually create the events now. He ' +
+                'reviews and edits on the calendar afterward; he does not want to be asked first.',
+          });
+          continue;
+        }
+
+        finalText = candidateText;
         history.push({ role: 'assistant', content: response.content });
         break;
       }
+
+      usedAnyTool = true;
 
       // Run every requested tool, feed results back, loop again.
       messages.push({ role: 'assistant', content: response.content });
@@ -322,6 +415,29 @@ export async function handleMessage(userText, telegramMessageId) {
         }
       }
       messages.push({ role: 'user', content: toolResults });
+
+      // Code-level guarantee for the "workout projection resync" rule (see SYSTEM_PROMPT) —
+      // relying purely on the model to remember to call this after every workout log is the
+      // same kind of prompt-only discipline that just failed for calendar creation above. Fire
+      // it automatically, silently, whenever a fitness delegate call succeeds. resync_workout_
+      // projections is a no-op if nothing drifted, so this is safe to run more than strictly
+      // necessary. Fire-and-forget: don't block or fail Shane's reply if this errors.
+      for (const use of toolUses) {
+        if (use.name === 'delegate_to_fitness_agent') {
+          const fitnessResult = toolResults.find((r) => r.tool_use_id === use.id);
+          if (fitnessResult && !fitnessResult.is_error) {
+            runTool(
+              'delegate_to_admin_agent',
+              {
+                request:
+                  'Run resync_workout_projections to re-check any projected workout blocks on ' +
+                  "the calendar against Shane's latest workout data.",
+              },
+              telegramMessageId,
+            ).catch((err) => logError('auto resync_workout_projections', err, telegramMessageId));
+          }
+        }
+      }
     }
   } catch (err) {
     await logError(userText, err, telegramMessageId);
@@ -334,5 +450,15 @@ export async function handleMessage(userText, telegramMessageId) {
   }
 
   history.push({ role: 'assistant', content: finalText });
+
+  logAgentRun({
+    requestSummary: userText.slice(0, 200),
+    model: MODEL,
+    usage: usageTotal,
+    toolsCalled: [...toolsCalledSet],
+    durationMs: Date.now() - startedAt,
+    telegramMessageId,
+  }).catch((err) => console.error('[Alex] logAgentRun failed:', err?.message ?? err));
+
   return finalText || "(no response text — logged as a gap)";
 }

@@ -5,8 +5,11 @@ dotenv.config();
 import { supabase } from '../supabaseClient.js';
 import { todayLocal } from '../utils/localDate.js';
 
+import { SIMPLE_MODEL } from '../modelTiers.js';
+
+import { fetchAgentMemories, formatCorrectionsBlock } from '../memoryScope.js';
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-const MODEL = process.env.ALEX_MODEL || 'claude-sonnet-5';
+const MODEL = SIMPLE_MODEL; // pure CRUD/logging agent — no complex judgment needed
 const DEFAULT_USER_ID = process.env.DEFAULT_USER_ID;
 
 const SYSTEM_PROMPT = `You are the Sleep Coach, a specialist sub-agent that Alex (Shane Pinho's Chief of Staff) \
@@ -23,8 +26,13 @@ again for a date already logged just updates that night's entry rather than dupl
 - bedtime/wake_time are timestamps (accept whatever time Shane gives you, e.g. "11:30pm" / "6:45am" — combine \
 with the given date as needed); hours_slept is a plain number of hours; quality is an integer 1-5 (1=terrible, \
 5=great).
-- source defaults to 'Manual'. Shane doesn't have a wearable yet — once he gets one (e.g. Apple Watch), sleep \
-data may start arriving with source set to that device instead; don't worry about that path for now.
+- source defaults to 'Manual'. Shane now has a HelioStrip wearable (Amazfit Helio Strap) that auto-syncs real \
+sleep-stage data (deep/REM/light/awake minutes, bedtime/wake time, a sleep score) into a separate table, \
+wearable_sleep_sessions — this is NOT the same table as sleep_logs and log_sleep/list_sleep_logs/ \
+get_sleep_progress do NOT read or write it.
+- Call get_wearable_sleep_snapshot whenever Shane asks about sleep stages, sleep score, or how well he actually \
+slept (as opposed to just "log that I slept 7 hours") — it returns the latest synced night from the wearable. \
+If it returns no data, say the wearable hasn't synced recently rather than guessing or falling back to sleep_logs.
 - get_sleep_progress looks at recent history and reports plain facts: average hours slept and average quality \
 over the last 7 and 30 days, and how many nights were logged. Use it whenever Shane asks "how's my sleep been" \
 or for a trend/routine suggestion — base any suggestion strictly on what the data shows (e.g. "you've averaged \
@@ -69,6 +77,15 @@ const toolDefs = [
       'were logged in each window. Use this for "how is my sleep" / trend / routine-suggestion questions.',
     input_schema: { type: 'object', properties: {} },
   },
+  {
+    name: 'get_wearable_sleep_snapshot',
+    description:
+      "Get Shane's most recent HelioStrip-synced night: duration, sleep stage breakdown (deep/REM/light/awake " +
+      'minutes), sleep score, and bedtime/wake time. Use for sleep-stage or sleep-quality questions — this is ' +
+      'real sensor data, separate from the manual sleep_logs entries.',
+    input_schema: { type: 'object', properties: {} },
+  cache_control: { type: 'ephemeral' },
+    },
 ];
 
 async function logSleep({ date, bedtime, wake_time, hours_slept, quality, notes }) {
@@ -132,6 +149,31 @@ async function getSleepProgress() {
   };
 }
 
+async function getWearableSleepSnapshot() {
+  const { data, error } = await supabase
+    .from('wearable_sleep_sessions')
+    .select('*')
+    .eq('user_id', DEFAULT_USER_ID)
+    .order('date', { ascending: false })
+    .limit(1);
+  if (error) throw error;
+  const session = data?.[0] ?? null;
+  if (!session) return { ok: true, has_data: false };
+  return {
+    ok: true,
+    has_data: true,
+    date: session.date,
+    total_min: session.total_min,
+    deep_min: session.deep_min,
+    rem_min: session.rem_min,
+    light_min: session.light_min,
+    awake_min: session.awake_min,
+    sleep_score: session.sleep_score,
+    bedtime: session.bedtime,
+    wake_time: session.wake_time,
+  };
+}
+
 async function runSleepTool(name, input) {
   switch (name) {
     case 'log_sleep':
@@ -140,6 +182,8 @@ async function runSleepTool(name, input) {
       return listSleepLogs(input);
     case 'get_sleep_progress':
       return getSleepProgress();
+    case 'get_wearable_sleep_snapshot':
+      return getWearableSleepSnapshot();
     default:
       throw new Error(`Unknown Sleep Coach tool: ${name}`);
   }
@@ -153,12 +197,20 @@ export async function runSleepAgent(request) {
   let finalText = null;
   let guard = 0;
 
+  const scopedMemories = await fetchAgentMemories('sleep_agent');
+  const correctionsBlock = formatCorrectionsBlock(scopedMemories);
+  const system = [
+    { type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } },
+    ...(correctionsBlock ? [{ type: 'text', text: correctionsBlock }] : []),
+  ];
+
+
   while (finalText === null && guard < 6) {
     guard += 1;
     const response = await anthropic.messages.create({
       model: MODEL,
       max_tokens: 1024,
-      system: SYSTEM_PROMPT,
+      system,
       tools: toolDefs,
       messages,
     });

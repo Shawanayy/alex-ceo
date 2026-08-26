@@ -2,8 +2,11 @@ import Anthropic from '@anthropic-ai/sdk';
 import dotenv from 'dotenv';
 dotenv.config();
 
+import { COMPLEX_MODEL } from '../modelTiers.js';
+
+import { fetchAgentMemories, formatCorrectionsBlock } from '../memoryScope.js';
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-const MODEL = process.env.ALEX_MODEL || 'claude-sonnet-5';
+const MODEL = COMPLEX_MODEL; // real judgment/writing/forecasting — Sonnet tier
 
 const SYSTEM_PROMPT = `You are the QA / Review Agent, a specialist sub-agent that Alex (Shane Pinho's Chief of \
 Staff) delegates a final review pass to before risky or high-stakes output reaches Shane. You have no tools and \
@@ -32,10 +35,17 @@ Be concise and factual — you're reporting back to another agent (Alex), not ch
 // with the same "run<Name>Agent(request)" shape as every other sub-agent so it plugs into the
 // same delegate_to_qa_agent wiring in tools.js.
 export async function runQaAgent(request) {
+    const scopedMemories = await fetchAgentMemories('qa_agent');
+  const correctionsBlock = formatCorrectionsBlock(scopedMemories);
+  const system = [
+    { type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } },
+    ...(correctionsBlock ? [{ type: 'text', text: correctionsBlock }] : []),
+  ];
+
   const response = await anthropic.messages.create({
     model: MODEL,
     max_tokens: 1024,
-    system: SYSTEM_PROMPT,
+    system,
     messages: [{ role: 'user', content: request }],
   });
 

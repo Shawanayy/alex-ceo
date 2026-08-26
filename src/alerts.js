@@ -175,5 +175,9 @@ export const alertToolDefs = (metricEnum) => [
       "plain factual notice into Shane's notifications table (dashboard-visible). Reports facts only — never " +
       'a recommendation of what to do about it.',
     input_schema: { type: 'object', properties: {} },
+    // Last tool in every agent's toolDefs array that spreads ...alertToolDefs(...) at the tail
+    // (Budgeting, Credit Score, Investment, Net Worth, Subscription) — marking it here caches the
+    // whole flattened toolDefs array for all five, since cache_control travels with the spread object.
+    cache_control: { type: 'ephemeral' },
   },
 ];

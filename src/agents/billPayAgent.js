@@ -4,8 +4,11 @@ dotenv.config();
 
 import { supabase } from '../supabaseClient.js';
 
+import { SIMPLE_MODEL } from '../modelTiers.js';
+
+import { fetchAgentMemories, formatCorrectionsBlock } from '../memoryScope.js';
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-const MODEL = process.env.ALEX_MODEL || 'claude-sonnet-5';
+const MODEL = SIMPLE_MODEL; // pure CRUD/logging agent — no complex judgment needed
 const DEFAULT_USER_ID = process.env.DEFAULT_USER_ID;
 
 const SYSTEM_PROMPT = `You are the Bill Pay Agent, a specialist sub-agent that Alex (Shane Pinho's Chief of \
@@ -103,7 +106,8 @@ const toolDefs = [
         limit: { type: 'integer', description: 'How many top-priority bills to push, default 3' },
       },
     },
-  },
+  cache_control: { type: 'ephemeral' },
+    },
 ];
 
 async function addOrUpdateBill({ name, amount, due_day, priority, autopay_status }) {
@@ -261,12 +265,20 @@ export async function runBillPayAgent(request) {
   let finalText = null;
   let guard = 0;
 
+  const scopedMemories = await fetchAgentMemories('bill_pay_agent');
+  const correctionsBlock = formatCorrectionsBlock(scopedMemories);
+  const system = [
+    { type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } },
+    ...(correctionsBlock ? [{ type: 'text', text: correctionsBlock }] : []),
+  ];
+
+
   while (finalText === null && guard < 6) {
     guard += 1;
     const response = await anthropic.messages.create({
       model: MODEL,
       max_tokens: 1024,
-      system: SYSTEM_PROMPT,
+      system,
       tools: toolDefs,
       messages,
     });

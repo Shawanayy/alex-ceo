@@ -83,11 +83,21 @@ export const toolDefs = [
   {
     name: 'remember',
     description:
-      "Save a fact, preference, or routine about Shane to long-term memory, so future conversations can use it.",
+      "Save a fact, preference, or routine to long-term memory. Two kinds: (1) general facts about Shane " +
+      "himself — omit agent_scope, these surface to you (the orchestrator) every conversation, same as " +
+      "today. (2) a correction to how ONE SPECIFIC sub-agent should behave going forward (e.g. Shane says " +
+      '"stop logging my runs as Legs day" to the Fitness Coach, or corrects how the Budgeting Agent ' +
+      "categorizes something) — set agent_scope to that sub-agent's name (e.g. 'fitness_agent', " +
+      "'budgeting_agent' — match the delegate_to_X tool name minus the 'delegate_to_' prefix, plus " +
+      "'_agent' if not already present). Scoped memories are NOT shown to you — that sub-agent pulls its " +
+      'own small slice of them at the start of every run instead, so the correction actually persists into ' +
+      "its future behavior instead of relying on you to restate it in every request you hand off. Prefer " +
+      "scoped when the correction is clearly about one sub-agent's behavior; use general for anything about " +
+      'Shane himself.',
     input_schema: {
       type: 'object',
       properties: {
-        content: { type: 'string', description: 'The fact/preference to remember, written plainly' },
+        content: { type: 'string', description: 'The fact/preference/correction to remember, written plainly' },
         memory_type: {
           type: 'string',
           enum: ['Preference', 'Vocabulary', 'Pattern', 'Fact'],
@@ -99,6 +109,12 @@ export const toolDefs = [
         importance: {
           type: 'integer',
           description: '1 (minor) to 5 (critical, always keep in context)',
+        },
+        agent_scope: {
+          type: 'string',
+          description:
+            "Optional. Set only when this is a correction to one specific sub-agent's behavior, e.g. " +
+            "'habit_agent', 'admin_agent', 'budgeting_agent'. Omit for general facts about Shane.",
         },
       },
       required: ['content'],
@@ -758,6 +774,9 @@ export const toolDefs = [
       },
       required: ['request_summary', 'reason'],
     },
+    // Last tool in the array — caches the entire toolDefs list (all ~35 tools, static across
+    // every call this process makes) so the orchestrator only pays full price for it once.
+    cache_control: { type: 'ephemeral' },
   },
 ];
 
@@ -796,13 +815,14 @@ async function setTimezone({ timezone }) {
   return { ok: true, timezone: resolved };
 }
 
-async function remember({ content, memory_type, importance }) {
+async function remember({ content, memory_type, importance, agent_scope }) {
   const { data, error } = await supabase
     .from('memories')
     .insert({
       content,
       memory_type: memory_type ?? 'Fact',
       importance: importance ?? 3,
+      agent_scope: agent_scope ?? null,
     })
     .select()
     .single();
@@ -1139,10 +1159,39 @@ export async function logError(requestSummary, error, telegramMessageId) {
   });
 }
 
+// Observability hook — one row per Telegram turn (not per internal loop iteration, to keep this
+// cheap and readable), logged from handleMessage() in alex.js once a turn finishes successfully.
+// Reuses the existing agent_logs table (detail is jsonb, no migration needed) rather than adding
+// a new one. Never throws — a logging hiccup should never break a real reply to Shane.
+export async function logAgentRun({ requestSummary, model, usage, toolsCalled, durationMs, telegramMessageId }) {
+  try {
+    await supabase.from('agent_logs').insert({
+      agent_name: 'alex_core',
+      event_type: 'run',
+      request_summary: requestSummary,
+      detail: {
+        model,
+        input_tokens: usage?.input_tokens ?? 0,
+        output_tokens: usage?.output_tokens ?? 0,
+        cache_read_input_tokens: usage?.cache_read_input_tokens ?? 0,
+        cache_creation_input_tokens: usage?.cache_creation_input_tokens ?? 0,
+        tools_called: toolsCalled ?? [],
+        duration_ms: durationMs ?? null,
+      },
+      telegram_message_id: telegramMessageId ?? null,
+    });
+  } catch (err) {
+    console.error('[Alex] Failed to log agent run:', err?.message ?? err);
+  }
+}
+
 export async function fetchMemories() {
+  // agent_scope IS NULL — scoped corrections are pulled directly by the relevant sub-agent
+  // instead (see memoryScope.js), so they're excluded here to keep this feed general-only.
   const { data, error } = await supabase
     .from('memories')
     .select('content, memory_type, importance')
+    .is('agent_scope', null)
     .order('importance', { ascending: false })
     .order('created_at', { ascending: false })
     .limit(15);

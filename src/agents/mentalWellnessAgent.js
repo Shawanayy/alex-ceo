@@ -5,8 +5,11 @@ dotenv.config();
 import { supabase } from '../supabaseClient.js';
 import { todayLocal } from '../utils/localDate.js';
 
+import { SIMPLE_MODEL } from '../modelTiers.js';
+
+import { fetchAgentMemories, formatCorrectionsBlock } from '../memoryScope.js';
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-const MODEL = process.env.ALEX_MODEL || 'claude-sonnet-5';
+const MODEL = SIMPLE_MODEL; // pure CRUD/logging agent — no complex judgment needed
 const DEFAULT_USER_ID = process.env.DEFAULT_USER_ID;
 
 const SYSTEM_PROMPT = `You are the Mental Wellness Agent, a specialist sub-agent that Alex (Shane Pinho's Chief \
@@ -71,7 +74,8 @@ const toolDefs = [
       'Compute plain average mood/stress facts over the last 7 and 30 days, and how many check-ins were ' +
       'logged in each window. Use this for "how have I been feeling" / trend questions.',
     input_schema: { type: 'object', properties: {} },
-  },
+  cache_control: { type: 'ephemeral' },
+    },
 ];
 
 async function logMoodCheckin({ date, mood, stress, notes }) {
@@ -148,12 +152,20 @@ export async function runMentalWellnessAgent(request) {
   let finalText = null;
   let guard = 0;
 
+  const scopedMemories = await fetchAgentMemories('mental_wellness_agent');
+  const correctionsBlock = formatCorrectionsBlock(scopedMemories);
+  const system = [
+    { type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } },
+    ...(correctionsBlock ? [{ type: 'text', text: correctionsBlock }] : []),
+  ];
+
+
   while (finalText === null && guard < 6) {
     guard += 1;
     const response = await anthropic.messages.create({
       model: MODEL,
       max_tokens: 1024,
-      system: SYSTEM_PROMPT,
+      system,
       tools: toolDefs,
       messages,
     });
