@@ -1,8 +1,10 @@
 import { supabase } from './supabaseClient.js';
 import { checkFacetimeStatus, recolorFlexibleEvents } from './agents/adminAgent.js';
+import { runDailyInvestmentBriefing } from './agents/investmentAgent.js';
+import { getUserTimeZone } from './utils/localDate.js';
 
 // The only proactive/background process in the app. Everything else is purely reactive to
-// incoming Telegram messages (see index.js). This loop does four things on a timer:
+// incoming Telegram messages (see index.js). This loop does five things on a timer:
 //   1. Evaluates 'active' schedule-based automation_rules and fires them (creates a
 //      notification) once their cadence interval has elapsed since last_run_at.
 //   2. Checks the calendar for a missing weekly family FaceTime / monthly Haliʻa date and
@@ -10,7 +12,9 @@ import { checkFacetimeStatus, recolorFlexibleEvents } from './agents/adminAgent.
 //   3. Backfills colorId on any flexible-category event (workout/study/ft_time/chores) that's
 //      missing one or has drifted — mainly catches events Shane types directly into Google
 //      Calendar himself, which skip Alex's create_event color-assignment entirely.
-//   4. Pushes undelivered 'high'/'medium' urgency notifications to Shane's Telegram and
+//   4. Once/day, past 7am Shane's local time, runs the Investment Analyst Agent's daily
+//      briefing and queues it as a notification (see checkDailyInvestmentBriefing below).
+//   5. Pushes undelivered 'high'/'medium' urgency notifications to Shane's Telegram and
 //      marks them delivered. 'low' urgency notifications are never proactively pushed —
 //      they just sit in the table for on-demand review via the Notification Manager.
 const POLL_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
@@ -118,6 +122,42 @@ async function checkFacetimeReminders() {
   }
 }
 
+// Runs the Investment Analyst Agent's daily briefing once/day, past 7am Shane's local time
+// (loose target — this loop only ticks every 5 min and the process can sleep on Render's free
+// tier, so "past 7am" rather than "exactly 7am" is what's actually achievable). Dedupes by
+// checking for a same-titled notification queued in the last 20 hours rather than doing precise
+// local-midnight math — simple, and safely spans the 24h gap between days without double-firing
+// or needing its own state table.
+async function checkDailyInvestmentBriefing() {
+  try {
+    const timeZone = await getUserTimeZone();
+    const localHour = Number(
+      new Intl.DateTimeFormat('en-US', { hour: 'numeric', hour12: false, timeZone }).format(new Date())
+    );
+    if (localHour < 7) return; // too early — try again on a later tick today
+
+    const twentyHoursAgo = new Date(Date.now() - 20 * 60 * 60 * 1000).toISOString();
+    const { data: recent, error } = await supabase
+      .from('notifications')
+      .select('id')
+      .eq('title', 'Daily Investment Briefing')
+      .gte('created_at', twentyHoursAgo)
+      .limit(1);
+    if (error) {
+      console.error('[Alex] Background loop: daily briefing dedupe check failed:', error.message);
+      return;
+    }
+    if (recent && recent.length > 0) return; // already sent today
+
+    const result = await runDailyInvestmentBriefing();
+    if (!result.ok) {
+      console.error('[Alex] Background loop: daily investment briefing failed:', result.error ?? result.reason);
+    }
+  } catch (err) {
+    console.error('[Alex] Background loop: daily investment briefing crashed:', err?.message ?? err);
+  }
+}
+
 async function pushPendingNotifications(bot, ownerId) {
   const { data: pending, error } = await supabase
     .from('notifications')
@@ -153,6 +193,7 @@ export function startBackgroundLoop(bot, ownerId) {
       } catch (err) {
         console.error('[Alex] Background loop: recolorFlexibleEvents failed:', err?.message ?? err);
       }
+      await checkDailyInvestmentBriefing();
       await pushPendingNotifications(bot, ownerId);
     } catch (err) {
       console.error('[Alex] Background loop tick failed:', err);

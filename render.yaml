@@ -32,6 +32,14 @@ services:
         sync: false
       - key: ADZUNA_APP_KEY
         sync: false
+      # Was missing from this service entirely — same gap the Plaid vars had (see below). Any
+      # Investment Analyst tool call routed through Cowork's ask_alex (which goes through this
+      # MCP service, not alex-ceo-bot) would 401/error on Alpha Vantage without it.
+      - key: ALPHA_VANTAGE_API_KEY
+        sync: false
+      # Financial Modeling Prep — Investment Analyst Agent's daily briefing + fundamentals tool.
+      - key: FMP_API_KEY
+        sync: false
       - key: PLAID_CLIENT_ID
         sync: false
       - key: PLAID_SECRET
@@ -91,6 +99,12 @@ services:
       - key: ADZUNA_APP_KEY
         sync: false
       - key: ALPHA_VANTAGE_API_KEY
+        sync: false
+      # Financial Modeling Prep — Investment Analyst Agent's daily briefing + fundamentals tool.
+      # This service is where backgroundLoop.js actually runs, so this is the one that matters
+      # for the daily briefing job specifically; alex-ceo-mcp also has it for on-demand
+      # get_company_fundamentals calls via Cowork's ask_alex.
+      - key: FMP_API_KEY
         sync: false
       - key: PLAID_CLIENT_ID
         sync: false

@@ -12,10 +12,18 @@ const { GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REDIRECT_URI, GOOGLE_REFR
 //   so in practice nothing gets sent, but this is an app-level restriction, not a
 //   hard OAuth-level one (Gmail has no "drafts only, cannot send" scope).
 // - calendar: full calendar read/write, needed for create_event.
+// - spreadsheets.readonly: added for the Investment Analyst Agent's daily briefing, to read
+//   (never write) Shane's STOCKS Google Sheet for entry-price/date history. Read-only at the
+//   OAuth level as a hard guarantee the sheet can't be modified, on top of the app-level rule
+//   that nothing ever calls a write method against it.
+// Adding a scope here requires re-running src/google/googleAuth.js once to mint a new
+// refresh token that actually covers it — existing refresh tokens don't retroactively gain
+// new scopes.
 export const SCOPES = [
   'https://www.googleapis.com/auth/calendar',
   'https://www.googleapis.com/auth/gmail.readonly',
   'https://www.googleapis.com/auth/gmail.compose',
+  'https://www.googleapis.com/auth/spreadsheets.readonly',
 ];
 
 export function createOAuthClient() {
@@ -50,4 +58,8 @@ export function getCalendarClient() {
 
 export function getGmailClient() {
   return google.gmail({ version: 'v1', auth: getAuthedClient() });
+}
+
+export function getSheetsClient() {
+  return google.sheets({ version: 'v4', auth: getAuthedClient() });
 }

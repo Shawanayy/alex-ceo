@@ -4,6 +4,15 @@ dotenv.config();
 
 import { supabase } from '../supabaseClient.js';
 import { alertToolDefs, setAlertRule, listAlertRules, deactivateAlertRule, evaluateRules, pushAlertNotifications } from '../alerts.js';
+import { getSheetsClient } from '../google/googleClient.js';
+import {
+  fmpQuote,
+  fmpHistoricalClose,
+  fmpKeyMetricsAndRatios,
+  fmpQuarterlyIncomeTrend,
+  fmpEarningsSurprises,
+  fmpStockNews,
+} from '../fmpClient.js';
 
 import { COMPLEX_MODEL } from '../modelTiers.js';
 
@@ -13,6 +22,15 @@ const MODEL = COMPLEX_MODEL; // real judgment/writing/forecasting — Sonnet tie
 const DEFAULT_USER_ID = process.env.DEFAULT_USER_ID;
 const ALPHA_VANTAGE_API_KEY = process.env.ALPHA_VANTAGE_API_KEY;
 const ALPHA_VANTAGE_BASE = 'https://www.alphavantage.co/query';
+
+// Shane's manually-maintained "STOCKS" Google Sheet — historical reference only. Read-only:
+// nothing in this file ever calls a Sheets write/update method against it, and the OAuth scope
+// itself (see googleClient.js) is spreadsheets.readonly, so it's not even possible to.
+const STOCKS_SHEET_ID = '1A2caj9CmnBbUDC8edsiP5m8hwhKIfAeZHMRxw0U968Q';
+// Row 24 is the header; data starts row 25. Columns confirmed by hand: A Account, B Company,
+// C Ticker, D Date Bought, E # Shares, F Cost/Share, G Current Price, H Cost Basis,
+// I Current Value, J Revenue ($), K % Return. 200 is generous headroom for years of new lots.
+const STOCKS_SHEET_RANGE = 'Stocks!A25:K200';
 
 const SYSTEM_PROMPT = `You are the Investment Analyst Agent, a specialist sub-agent that Alex (Shane Pinho's \
 Chief of Staff) delegates investment/portfolio requests to. You have real tools backed by Shane's LifeOS \
@@ -45,6 +63,18 @@ aggregated data. This is third-party sourced data, not your own opinion — alwa
 on top of them.
 If Alpha Vantage returns a rate-limit or error message, report that plainly (e.g. "hit today's API rate \
 limit") rather than inventing numbers.
+
+Deeper fundamentals (Financial Modeling Prep, a second live data source):
+- get_company_fundamentals: TTM margins, free cash flow per share, debt ratios, valuation, the last 4 \
+quarters of revenue/EPS (so growth direction is visible, not just one snapshot), and the most recent \
+earnings beat/miss. Use this over get_company_overview when Shane's question is really "is the business \
+actually getting better or worse," not just "what's the current snapshot."
+
+You also power a fully automated daily briefing (see runDailyInvestmentBriefing, not something Shane calls \
+directly) that reads his real investment history from his STOCKS Google Sheet (read-only — you never write \
+to it) alongside live FMP data, and pushes a 6-section report to his notifications feed each morning. If \
+Shane asks about that briefing (e.g. "why didn't I get today's briefing", "what does the daily report cover"), \
+you can explain what it does, but you don't trigger it yourself — it runs on its own schedule.
 
 Important boundary: you are not a licensed financial advisor and must not give personalized buy/sell \
 investment advice or tell Shane what to do with his money. You CAN state plain facts — his portfolio's \
@@ -163,6 +193,20 @@ const toolDefs = [
       required: ['ticker'],
     },
   },
+  {
+    name: 'get_company_fundamentals',
+    description:
+      'Get deeper fundamentals for one ticker from Financial Modeling Prep — TTM margins (gross/operating/' +
+      'net), free cash flow per share, debt ratios, valuation (P/E, price-to-FCF), and the last few quarters ' +
+      'of revenue/EPS so growth direction is visible, plus the most recent earnings beat/miss. Richer than ' +
+      'get_company_overview (which is Alpha Vantage, single-snapshot) — use this one when Shane wants to ' +
+      'understand whether the actual business is improving or deteriorating, not just the current price.',
+    input_schema: {
+      type: 'object',
+      properties: { ticker: { type: 'string', description: "Stock ticker symbol, e.g. 'NVDA'" } },
+      required: ['ticker'],
+    },
+  },
   ...alertToolDefs(['max_position_pct']),
 ];
 
@@ -191,6 +235,40 @@ async function fetchHoldings() {
   const { data, error } = await supabase.from('holdings').select('*').eq('user_id', DEFAULT_USER_ID);
   if (error) throw error;
   return data ?? [];
+}
+
+// Reads Shane's investment-history lots straight from the STOCKS sheet — read-only, never
+// written to. Used by the daily briefing to ground "how did my past decisions play out" and
+// "what was my approximate entry" in his own real data instead of guessing from Supabase alone
+// (the sheet is his longer, hand-maintained record; Supabase holdings/portfolio_summary are the
+// dashboard's live rollup). Returns [] on any failure rather than throwing, since a sheet-read
+// hiccup shouldn't block the rest of the briefing from running.
+async function fetchSheetHistory() {
+  try {
+    const sheets = getSheetsClient();
+    const res = await sheets.spreadsheets.values.get({
+      spreadsheetId: STOCKS_SHEET_ID,
+      range: STOCKS_SHEET_RANGE,
+    });
+    const rows = res.data.values ?? [];
+    return rows
+      .filter((r) => r[2]) // Ticker (col C, index 2) present
+      .map((r) => ({
+        account: r[0] ?? null,
+        company: r[1] ?? null,
+        ticker: r[2],
+        date_bought: r[3] ?? null,
+        shares: r[4] ?? null,
+        cost_per_share: r[5] ?? null,
+        cost_basis: r[7] ?? null,
+        current_value: r[8] ?? null,
+        revenue_dollar: r[9] ?? null,
+        pct_return: r[10] ?? null,
+      }));
+  } catch (err) {
+    console.error('[Alex] Investment Agent: failed to read STOCKS sheet history:', err?.message ?? err);
+    return [];
+  }
 }
 
 function withGain(h) {
@@ -389,6 +467,25 @@ async function getPortfolioDailyMovers() {
   };
 }
 
+async function getCompanyFundamentals({ ticker }) {
+  const [metrics, incomeTrend, earnings] = await Promise.all([
+    fmpKeyMetricsAndRatios(ticker),
+    fmpQuarterlyIncomeTrend(ticker, 4),
+    fmpEarningsSurprises(ticker, 2),
+  ]);
+  if (!metrics.ok && !incomeTrend.ok && !earnings.ok) {
+    return { ok: false, error: metrics.error || incomeTrend.error || earnings.error || `No FMP data for '${ticker}'.` };
+  }
+  return {
+    ok: true,
+    source: 'Financial Modeling Prep',
+    ticker,
+    fundamentals_ttm: metrics.ok ? metrics : null,
+    quarterly_trend: incomeTrend.ok ? incomeTrend.quarters : null,
+    recent_earnings_surprises: earnings.ok ? earnings.surprises : null,
+  };
+}
+
 async function checkAlertRules() {
   const { allocation } = await getPortfolioAllocation();
   const maxPositionPctByTicker = {};
@@ -432,6 +529,8 @@ async function runInvestmentTool(name, input) {
       return getPortfolioDailyMovers();
     case 'get_analyst_consensus':
       return getAnalystConsensus(input);
+    case 'get_company_fundamentals':
+      return getCompanyFundamentals(input);
     case 'set_alert_rule':
       return setAlertRule({ agent: 'investment', ...input });
     case 'list_alert_rules':
@@ -506,4 +605,145 @@ export async function runInvestmentAgent(request) {
   }
 
   return finalText || "Investment Analyst Agent got stuck and didn't produce a final answer — try rephrasing the request.";
+}
+
+// ---------------------------------------------------------------------------------------------
+// Daily Investment Briefing — the automated job, not something Shane (or Alex) calls
+// interactively. Triggered once/day by backgroundLoop.js. Single self-contained Anthropic call
+// (not a tool-use loop): all the data it needs is gathered up front in plain JS, then handed to
+// Sonnet once to write the report, since the shape of "what data goes in" is fixed and doesn't
+// benefit from letting the model decide which tools to call turn by turn.
+// ---------------------------------------------------------------------------------------------
+
+const BRIEFING_SYSTEM_PROMPT = `You are the Investment Analyst Agent, writing Shane Pinho's automated daily \
+investment briefing. This is a background report, not a conversation — you get one shot, with all the data \
+already gathered for you below, to write the whole thing.
+
+Your job is to act like a personal research analyst working under Alex (Shane's Chief of Staff): surface what \
+actually deserves Shane's attention today, using his real portfolio, his real investment history (from his \
+own hand-kept Google Sheet — read-only, treat it as ground truth for what he bought, when, and at what price), \
+and live market/fundamental data. You are NOT giving investment advice — never recommend buying, selling, or \
+rebalancing anything. Your job is to surface facts, trends, risks, and opportunities; Shane decides what to do \
+with them.
+
+Ground rules:
+- Compare today's data against history (the week/month-ago prices provided, and his own entry prices/dates \
+from the sheet) before calling anything a "trend" — one day of movement is noise, not a pattern, unless it's \
+large enough to be notable on its own (e.g. a double-digit % single-day move).
+- Prioritize meaningful, decision-relevant changes over routine noise. If nothing meaningful happened for a \
+holding, say so briefly or omit it — don't manufacture significance.
+- Clearly distinguish FACTS (numbers, reported events) from ANALYSIS (what the numbers suggest when read \
+together) from POTENTIAL IMPLICATIONS (what this could mean for Shane's existing thesis on that position) — \
+make this distinction obvious in how you write each item, not just internally.
+- When something touches Shane's own past decisions (e.g. a position he added to recently, or one he's held \
+a long time), weave in what his history shows — this is how he learns from his own patterns over time.
+- Never invent a number. If a data source came back with an error for a ticker, just skip that data point for \
+that ticker rather than guessing.
+- Keep the whole report concise — this is a daily skim, not a research memo. Favor short, information-dense \
+lines over paragraphs.
+
+Output format — Telegram message, use *asterisks* for bold section headers, plain concise bullets/lines under \
+each, skip any section entirely if there's genuinely nothing worth reporting in it (don't pad):
+
+🚨 *Important Today*
+The 1-2 most important things Shane should know today. If truly nothing rises to this level, say so plainly.
+
+📈 *Portfolio*
+Notable price movements or developments in his actual holdings.
+
+📊 *Fundamental Changes*
+Notable changes in company financials/valuation (margins, FCF, debt, revenue/EPS growth, earnings results) \
+for his holdings.
+
+🌎 *Market/Industry Trends*
+Broader trends that could affect his holdings.
+
+⚠️ *Risks*
+Anything that deserves watching.
+
+👀 *Watchlist*
+Stocks/companies/sectors/trends worth monitoring going forward (not necessarily urgent today).`;
+
+async function fetchTickerMarketData(ticker) {
+  const [quote, weekAgo, monthAgo, fundamentals, quarterlyTrend, earnings, news] = await Promise.all([
+    fmpQuote(ticker),
+    fmpHistoricalClose(ticker, 7),
+    fmpHistoricalClose(ticker, 30),
+    fmpKeyMetricsAndRatios(ticker),
+    fmpQuarterlyIncomeTrend(ticker, 4),
+    fmpEarningsSurprises(ticker, 2),
+    fmpStockNews(ticker, 3),
+  ]);
+
+  return {
+    ticker,
+    quote: quote.ok ? quote : null,
+    close_7_days_ago: weekAgo.ok ? weekAgo : null,
+    close_30_days_ago: monthAgo.ok ? monthAgo : null,
+    fundamentals_ttm: fundamentals.ok ? fundamentals : null,
+    quarterly_trend: quarterlyTrend.ok ? quarterlyTrend.quarters : null,
+    recent_earnings_surprises: earnings.ok ? earnings.surprises : null,
+    recent_news: news.ok ? news.articles : null,
+  };
+}
+
+// Runs the full daily briefing: gather -> one Sonnet call -> push to notifications. Called by
+// backgroundLoop.js once/day (see the dedup-by-day check there). Returns a small result object
+// for logging rather than throwing on partial data — a briefing with some missing fields is
+// still worth sending; only a total failure to produce any text should be treated as an error.
+export async function runDailyInvestmentBriefing() {
+  const [holdingsRaw, sheetHistory, summaryResult] = await Promise.all([
+    fetchHoldings(),
+    fetchSheetHistory(),
+    getPortfolioSummary(),
+  ]);
+
+  const holdings = holdingsRaw.map(withGain);
+  const distinctTickers = [...new Set(holdings.map((h) => h.ticker).filter(Boolean))];
+
+  if (distinctTickers.length === 0) {
+    return { ok: true, skipped: true, reason: 'No holdings to brief on.' };
+  }
+
+  const marketData = await Promise.all(distinctTickers.map((t) => fetchTickerMarketData(t)));
+
+  const context = {
+    portfolio_summary: summaryResult.ok ? summaryResult.summary ?? null : null,
+    current_holdings: holdings,
+    investment_history_from_sheet: sheetHistory,
+    live_market_and_fundamentals_by_ticker: marketData,
+  };
+
+  const userMessage =
+    "Here is today's data. Write the daily briefing per your instructions.\n\n" +
+    JSON.stringify(context, null, 2);
+
+  const response = await anthropic.messages.create({
+    model: MODEL,
+    max_tokens: 2000,
+    system: [{ type: 'text', text: BRIEFING_SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }],
+    messages: [{ role: 'user', content: userMessage }],
+  });
+
+  const reportText = response.content
+    .filter((b) => b.type === 'text')
+    .map((b) => b.text)
+    .join('\n')
+    .trim();
+
+  if (!reportText) {
+    return { ok: false, error: 'Daily briefing generation produced no text.' };
+  }
+
+  const { error: insertErr } = await supabase.from('notifications').insert({
+    source_agent: 'investment_agent',
+    urgency: 'medium',
+    title: 'Daily Investment Briefing',
+    body: reportText,
+  });
+  if (insertErr) {
+    return { ok: false, error: `Briefing generated but failed to queue notification: ${insertErr.message}` };
+  }
+
+  return { ok: true, tickers_covered: distinctTickers, usage: response.usage };
 }
