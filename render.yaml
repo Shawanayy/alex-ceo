@@ -109,6 +109,33 @@ services:
       - key: GOOGLE_REFRESH_TOKEN
         sync: false
 
+  # Daily Plaid transaction/balance sync (src/scripts/syncCheckingBalance.js). This is what was
+  # missing this whole time — nothing ever re-triggered a Plaid sync after the initial bank link,
+  # so transactions silently went stale for a month. Runs as its own Cron Job (not a web service)
+  # since it just needs to wake up, pull fresh transactions/balances via Plaid, write them to
+  # Supabase, and exit. 16:00 UTC = ~6:00am Hawaii time (no DST in Hawaii, so no seasonal drift
+  # to account for, unlike the price-alert monitors below).
+  - type: cron
+    name: alex-ceo-plaid-sync
+    env: node
+    plan: starter
+    schedule: "0 16 * * *"
+    buildCommand: npm install
+    startCommand: node src/scripts/syncCheckingBalance.js
+    envVars:
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: DEFAULT_USER_ID
+        sync: false
+      - key: PLAID_CLIENT_ID
+        sync: false
+      - key: PLAID_SECRET
+        sync: false
+      - key: PLAID_ENV
+        value: production
+
   # Twice-a-day (not hourly) read-only price alert monitor (src/priceAlertMonitor.js).
   # Notify-only — no trading, no cost basis, no Robinhood/Plaid access. Runs as two Cron Jobs
   # rather than a long-lived web service since each just needs to wake up, check prices, maybe
