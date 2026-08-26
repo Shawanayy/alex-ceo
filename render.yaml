@@ -32,6 +32,12 @@ services:
         sync: false
       - key: ADZUNA_APP_KEY
         sync: false
+      - key: PLAID_CLIENT_ID
+        sync: false
+      - key: PLAID_SECRET
+        sync: false
+      - key: PLAID_ENV
+        value: production
       - key: ALEX_REMOTE_MCP_TOKEN
         sync: false
       - key: N8N_WEBHOOK_URL
@@ -91,7 +97,7 @@ services:
       - key: PLAID_SECRET
         sync: false
       - key: PLAID_ENV
-        value: sandbox
+        value: production
       - key: N8N_WEBHOOK_URL
         sync: false
       - key: GOOGLE_CLIENT_ID
