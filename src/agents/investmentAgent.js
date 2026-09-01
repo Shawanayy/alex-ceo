@@ -722,7 +722,9 @@ a long time), weave in what his history shows — this is how he learns from his
 - Never invent a number. If a data source came back with an error for a ticker, just skip that data point for \
 that ticker rather than guessing.
 - Keep the whole report concise — this is a daily skim, not a research memo. Favor short, information-dense \
-lines over paragraphs.
+lines over paragraphs. HARD CAP: no more than 4 short bullets/lines per section, each under ~30 words. This \
+is a firm limit, not a target to approach — the report must finish cleanly with all 6 section headers present \
+(even if some just say "Nothing notable today"), never trail off or get cut short partway through a section.
 
 Output format — Telegram message, use *asterisks* for bold section headers, plain concise bullets/lines under \
 each, skip any section entirely if there's genuinely nothing worth reporting in it (don't pad):
@@ -811,7 +813,7 @@ export async function runDailyInvestmentBriefing() {
 
   const response = await anthropic.messages.create({
     model: MODEL,
-    max_tokens: 2000,
+    max_tokens: 3500,
     system: [{ type: 'text', text: BRIEFING_SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }],
     messages: [{ role: 'user', content: userMessage }],
   });
