@@ -55,7 +55,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   if (!message || typeof message !== 'string') {
     throw new Error('"message" (string) is required.');
   }
-  const reply = await handleMessage(message, null);
+  // Own fixed session key — separate from Telegram and from Cowork's remote MCP connector — so
+  // classic Claude Desktop's local history never mixes with either. See alex.js's
+  // getSessionHistory() note.
+  const reply = await handleMessage(message, null, 'local-mcp-desktop');
   return { content: [{ type: 'text', text: reply }] };
 });
 
@@ -63,7 +66,10 @@ const transport = new StdioServerTransport();
 await server.connect(transport);
 console.error('[Alex MCP] Ready — listening on stdio.');
 
-"alex-ceo": {
-  "command": "node",
-  "args": ["/Users/susanpinho/Desktop/Alex CEO/src/mcpServer.js"]
-}
+// Example Claude Desktop MCP config (was previously left as stray, uncommented JSON here —
+// that's a syntax error, this file couldn't actually run. Fixed 2026-09-22, unrelated to the
+// session-id change above.):
+// "alex-ceo": {
+//   "command": "node",
+//   "args": ["/Users/susanpinho/Desktop/Alex CEO/src/mcpServer.js"]
+// }

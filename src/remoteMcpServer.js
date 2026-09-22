@@ -66,7 +66,11 @@ function buildServer() {
     if (!message || typeof message !== 'string') {
       throw new Error('"message" (string) is required.');
     }
-    const reply = await handleMessage(message, null);
+    // Fixed, hardcoded session key — not per-request — since Cowork's MCP connector is stateless
+    // and gives us no way to tell different chat windows apart. This keeps Cowork's history fully
+    // separate from Telegram's; it relies on Shane only ever enabling this connector in his one
+    // dedicated Alex chat, same as agreed. See alex.js's getSessionHistory() for the full note.
+    const reply = await handleMessage(message, null, 'cowork-alex');
     return { content: [{ type: 'text', text: reply }] };
   });
 

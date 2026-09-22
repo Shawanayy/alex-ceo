@@ -74,7 +74,7 @@ bot.on('message', async (msg) => {
   await bot.sendChatAction(chatId, 'typing');
 
   try {
-    const reply = await handleMessage(text, msg.message_id);
+    const reply = await handleMessage(text, msg.message_id, 'telegram');
     await bot.sendMessage(chatId, reply);
   } catch (err) {
     console.error('[Alex] Unhandled error:', err);
