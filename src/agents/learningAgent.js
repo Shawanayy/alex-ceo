@@ -8,6 +8,7 @@ import { fetchCanvasEvents, isCanvasConfigured } from '../canvas/canvasFeed.js';
 import { COMPLEX_MODEL } from '../modelTiers.js';
 
 import { fetchAgentMemories, formatCorrectionsBlock } from '../memoryScope.js';
+import { routeToFreeWorker } from '../ai/workerRouter.js';
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 const MODEL = COMPLEX_MODEL; // real judgment/writing/forecasting — Sonnet tier
 const DEFAULT_USER_ID = process.env.DEFAULT_USER_ID;
@@ -479,17 +480,39 @@ ${cardBlock}
 Assignments/exams on file:
 ${assignmentBlock}`;
 
-  const response = await anthropic.messages.create({
-    model: MODEL,
-    max_tokens: 1500,
-    messages: [{ role: 'user', content: prompt }],
+  // PILOT (2026-09-21): try the free-worker router first (Groq/OpenRouter/Gemini — whichever
+  // is configured and free, per src/ai/policy.js). Falls through to the original, unchanged
+  // direct Anthropic call below whenever no free worker is available/configured, which today
+  // is always true (no free-provider keys are set yet), so behavior is currently identical to
+  // before this pilot existed. See src/ai/workerRouter.js's design note for details.
+  // maxTokens is higher here (2200) than the legacy Anthropic call below (1500): live testing
+  // 2026-09-21 showed Groq's gpt-oss-20b runs noticeably more verbose (markdown tables, more
+  // explanatory text) for the same prompt and hit the old 1500 cap mid-answer. Anthropic's own
+  // call keeps its original 1500 unchanged, since that was never the one truncating.
+  const routed = await routeToFreeWorker({
+    taskId: crypto.randomUUID(),
+    category: 'learning.study_guide',
+    userPrompt: prompt,
+    maxTokens: 2200,
+    responseFormat: 'text',
   });
 
-  const guide = response.content
-    .filter((b) => b.type === 'text')
-    .map((b) => b.text)
-    .join('\n')
-    .trim();
+  let guide;
+  if (routed.ok) {
+    guide = routed.text.trim();
+  } else {
+    const response = await anthropic.messages.create({
+      model: MODEL,
+      max_tokens: 1500,
+      messages: [{ role: 'user', content: prompt }],
+    });
+
+    guide = response.content
+      .filter((b) => b.type === 'text')
+      .map((b) => b.text)
+      .join('\n')
+      .trim();
+  }
 
   return { ok: true, study_guide: guide };
 }
@@ -513,17 +536,31 @@ exams are found, return an empty exams array.
 Syllabus text:
 ${syllabus_text.slice(0, 12000)}`;
 
-  const extraction = await anthropic.messages.create({
-    model: MODEL,
-    max_tokens: 1024,
-    messages: [{ role: 'user', content: extractionPrompt }],
+  // PILOT (2026-09-21): same free-worker-first pattern as generateStudyGuide above.
+  const routedExtraction = await routeToFreeWorker({
+    taskId: crypto.randomUUID(),
+    category: 'learning.syllabus_extraction',
+    userPrompt: extractionPrompt,
+    maxTokens: 1024,
+    responseFormat: 'json',
   });
 
-  const raw = extraction.content
-    .filter((b) => b.type === 'text')
-    .map((b) => b.text)
-    .join('\n')
-    .trim();
+  let raw;
+  if (routedExtraction.ok) {
+    raw = routedExtraction.text.trim();
+  } else {
+    const extraction = await anthropic.messages.create({
+      model: MODEL,
+      max_tokens: 1024,
+      messages: [{ role: 'user', content: extractionPrompt }],
+    });
+
+    raw = extraction.content
+      .filter((b) => b.type === 'text')
+      .map((b) => b.text)
+      .join('\n')
+      .trim();
+  }
 
   let parsed;
   try {
