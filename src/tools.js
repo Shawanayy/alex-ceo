@@ -34,8 +34,6 @@ import { runSecurityAgent } from './agents/securityAgent.js';
 import { runDataAnalyticsAgent } from './agents/dataAnalyticsAgent.js';
 import { runNotificationAgent } from './agents/notificationAgent.js';
 
-const N8N_WEBHOOK_URL = process.env.N8N_WEBHOOK_URL;
-
 // Anthropic tool-use definitions. Keep this list honest: only include a tool
 // here once the underlying capability actually works end-to-end.
 export const toolDefs = [
@@ -43,7 +41,7 @@ export const toolDefs = [
     name: 'add_task',
     description:
       "Add a new task to Alex's OWN internal task list in Supabase (separate from Shane's LifeOS " +
-      "dashboard). Do NOT use this for todos Shane wants tracked on his dashboard — use trigger_n8n for " +
+      "dashboard). Do NOT use this for todos Shane wants tracked on his dashboard — use add_dashboard_todo for " +
       'those instead. Only use add_task when Shane explicitly wants something tracked just within Alex, ' +
       'not on the dashboard.',
     input_schema: {
@@ -277,7 +275,7 @@ export const toolDefs = [
       "to Shane's LifeOS dashboard finance tables (accounts, budgets, transactions). Use this for: " +
       'setting or updating a monthly budget for a category, logging an expense or income transaction, ' +
       "comparing actual spend against budget for this month, checking account balances, and forecasting " +
-      'cash flow forward based on recent spending trends. Do NOT use trigger_n8n for these — this is a ' +
+      'cash flow forward based on recent spending trends. Do NOT use add_dashboard_todo for these — this is a ' +
       'real, working finance capability. Pass along enough context (category, amount, dates) for it to ' +
       'act without asking Shane anything else.',
     input_schema: {
@@ -299,7 +297,7 @@ export const toolDefs = [
       'due day, priority, autopay status), listing tracked bills, marking a bill as paid, checking which ' +
       'bills lack verified autopay, getting the top-priority bills (unpaid, ranked by urgency), and ' +
       'pushing bill reminders into Shane\'s notifications table for his dashboard and existing weekly- ' +
-      "review scheduler. Do NOT use trigger_n8n for these — this is a real, working capability. Pass " +
+      "review scheduler. Do NOT use add_dashboard_todo for these — this is a real, working capability. Pass " +
       'along enough context (bill name, amount, due day) for it to act without asking Shane anything else.',
     input_schema: {
       type: 'object',
@@ -319,8 +317,8 @@ export const toolDefs = [
       "access to Shane's LifeOS dashboard (portfolio_summary, accounts, and a net_worth_history table it " +
       'keeps for trend reporting). Use this for: recording/checking his current net worth, listing past ' +
       'snapshots, and month-over-month or longer trend/progress questions. This is assets only (investments ' +
-      '+ cash) — there is no debt/liability tracking yet, so never imply otherwise. Do NOT use trigger_n8n ' +
-      'for these — this is a real, working capability.',
+      '+ cash) — there is no debt/liability tracking yet, so never imply otherwise. This is a real, ' +
+      'working capability.',
     input_schema: {
       type: 'object',
       properties: {
@@ -342,7 +340,7 @@ export const toolDefs = [
       'personal "bull and bear of the day," and Wall Street analyst consensus (price target, Buy/Hold/Sell ' +
       'rating counts — attributed third-party data, not its own opinion). It will NOT give personalized ' +
       'buy/sell investment advice — that\'s an honest limitation of the agent itself, not a reason to route ' +
-      'elsewhere. Do NOT use trigger_n8n for these — this is a real, working capability.',
+      'elsewhere. Do NOT use add_dashboard_todo for these — this is a real, working capability.',
     input_schema: {
       type: 'object',
       properties: {
@@ -362,7 +360,7 @@ export const toolDefs = [
       'waiting on (W-2, 1099), or estimated payment for a given tax year, listing tracked tax items, marking ' +
       'one collected/filed/paid, and checking upcoming tax deadlines. It will NOT give personalized tax ' +
       'advice — that\'s an honest limitation of the agent itself, not a reason to route elsewhere. Do NOT use ' +
-      'trigger_n8n for these — this is a real, working capability.',
+      'add_dashboard_todo for these — this is a real, working capability.',
     input_schema: {
       type: 'object',
       properties: {
@@ -382,7 +380,7 @@ export const toolDefs = [
       'adding/updating a subscription (amount, billing cycle, next charge date, trial status), listing ' +
       'tracked subscriptions, cancelling one, checking upcoming charges or trials about to convert, totaling ' +
       'monthly subscription spend, and pushing subscription reminders to the dashboard. Do NOT use ' +
-      'trigger_n8n for these — this is a real, working capability.',
+      'add_dashboard_todo for these — this is a real, working capability.',
     input_schema: {
       type: 'object',
       properties: {
@@ -401,7 +399,7 @@ export const toolDefs = [
       "real access to Shane's LifeOS dashboard credit_score_history table. Use this for: recording a credit " +
       'score Shane reports, checking his current/most recent score, listing past snapshots, and ' +
       'month-over-month or longer trend questions. There is no live credit bureau integration — it only ' +
-      'records scores Shane tells it. Do NOT use trigger_n8n for these — this is a real, working capability.',
+      'records scores Shane tells it. Do NOT use add_dashboard_todo for these — this is a real, working capability.',
     input_schema: {
       type: 'object',
       properties: {
@@ -711,23 +709,24 @@ export const toolDefs = [
     },
   },
   {
-    name: 'trigger_n8n',
+    name: 'add_dashboard_todo',
     description:
-      "DEFAULT tool for anything that belongs on Shane's LifeOS dashboard. Use this — not add_task, not " +
-      'remember, not log_gap — whenever Shane mentions a todo, a goal, a calendar-related note (that is ' +
-      "not a request to actually create/check a real Google Calendar event — that's the Admin Agent's " +
-      'job), a finance item, coursework/learning item, or anything else that sounds like something his ' +
-      'dashboard tracks. If in doubt whether something is a dashboard capture, prefer trigger_n8n over ' +
-      'other tools. Pass along the relevant text from what Shane said so the workflow has full context.',
+      "Add a todo to Shane's LifeOS DASHBOARD. This is the tool for any normal todo he gives you " +
+      "— groceries, errands, reminders, things to do. It writes straight to Supabase and shows up " +
+      'on the dashboard. Do NOT use add_task for these: add_task is a separate internal list the ' +
+      'dashboard does not read. Categories must be one of: School, Work, Activities, Personal, ' +
+      "'!!!', Other, Club, Hali'a, Claude, Finance, Chores — groceries/shopping/errands are Chores. " +
+      'Priority is Critical, High, Medium or Low.',
     input_schema: {
       type: 'object',
       properties: {
-        request: {
-          type: 'string',
-          description: "The text to send to the n8n workflow — what Shane said/wants captured.",
-        },
+        title: { type: 'string', description: 'Short title of the todo.' },
+        category: { type: 'string', description: 'One of the allowed categories.' },
+        priority: { type: 'string', description: 'Critical, High, Medium or Low.' },
+        due_date: { type: 'string', description: 'YYYY-MM-DD, only if Shane gave a date.' },
+        description: { type: 'string', description: 'Optional extra detail.' },
       },
-      required: ['request'],
+      required: ['title'],
     },
   },
   {
@@ -995,46 +994,12 @@ async function delegateToNotificationAgent({ request }) {
   return { ok: true, result };
 }
 
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-
-// The n8n webhook is self-hosted behind Tailscale, which can occasionally have transient
-// network blips. Retry a few times with a short backoff before giving up, so a real dashboard
-// capture doesn't get silently dropped by one bad request.
-const N8N_MAX_ATTEMPTS = 3;
-const N8N_RETRY_DELAY_MS = 700;
-
-async function triggerN8n({ request }) {
-  if (!N8N_WEBHOOK_URL) {
-    throw new Error('Missing N8N_WEBHOOK_URL in .env');
-  }
-
-  let lastError = null;
-  for (let attempt = 1; attempt <= N8N_MAX_ATTEMPTS; attempt += 1) {
-    try {
-      const res = await fetch(N8N_WEBHOOK_URL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text: request, source: 'alex_telegram' }),
-      });
-      if (!res.ok) {
-        throw new Error(`n8n webhook returned ${res.status} ${res.statusText}`);
-      }
-      let data = null;
-      try {
-        data = await res.json();
-      } catch {
-        // n8n may not return JSON — that's fine, still a success.
-      }
-      return { ok: true, n8n_response: data, attempts: attempt };
-    } catch (err) {
-      lastError = err;
-      if (attempt < N8N_MAX_ATTEMPTS) {
-        await sleep(N8N_RETRY_DELAY_MS * attempt);
-      }
-    }
-  }
-  throw new Error(`n8n webhook failed after ${N8N_MAX_ATTEMPTS} attempts: ${String(lastError?.message ?? lastError)}`);
-}
+// Removed 2026-09-23: triggerN8n() and its N8N_WEBHOOK_URL-based retry logic. It was already
+// unreachable — no toolDefs entry or dispatcher case called it — and Alex's own system prompt
+// said "the n8n webhook is dead and must never be used." Note: this is unrelated to Shane's
+// actual live n8n instance (the separate "LifeOS" workflows: Telegram Brain, Rent Reminder,
+// Finance Sync, Google Calendar Sync, Voice/Text Webhook) — those are real, active, and untouched
+// by this cleanup. This was only ever Alex CEO's own dead fallback-capture code.
 
 async function logGap({ request_summary, reason }, telegramMessageId) {
   const { error } = await supabase.from('agent_logs').insert({
@@ -1140,8 +1105,8 @@ export async function runTool(name, input, telegramMessageId) {
       return delegateToDataAnalyticsAgent(input);
     case 'delegate_to_notification_agent':
       return delegateToNotificationAgent(input);
-    case 'trigger_n8n':
-      return triggerN8n(input);
+    case 'add_dashboard_todo':
+      return addDashboardTodo(input);
     case 'log_gap':
       return logGap(input, telegramMessageId);
     default:
@@ -1200,4 +1165,29 @@ export async function fetchMemories() {
     return [];
   }
   return data ?? [];
+}
+
+
+// Added 2026-09-10. Alex had no tool that wrote to the dashboard todo list: add_task goes to a
+// separate internal table, and the old n8n fallback (removed 2026-09-23) silently discarded
+// everything. This is the real path.
+async function addDashboardTodo(input) {
+  const { data, error } = await supabase
+    .from('todos')
+    .insert({
+      user_id: 'a0000000-0000-0000-0000-000000000001',
+      title: input.title,
+      description: input.description ?? null,
+      category: input.category ?? 'Other',
+      priority: input.priority ?? 'Medium',
+      due_date: input.due_date ?? null,
+      source: 'Telegram',
+    })
+    .select('id, title, category, priority, due_date')
+    .single();
+
+  if (error) {
+    throw new Error(`Could not save the todo to the dashboard: ${error.message}`);
+  }
+  return { ok: true, saved: data };
 }
