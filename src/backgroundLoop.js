@@ -1,7 +1,8 @@
 import { supabase } from './supabaseClient.js';
-import { checkFacetimeStatus, recolorFlexibleEvents } from './agents/adminAgent.js';
+import { checkFacetimeStatus, selfHealCalendarEvents } from './agents/adminAgent.js';
 import { runDailyInvestmentBriefing } from './agents/investmentAgent.js';
 import { getUserTimeZone } from './utils/localDate.js';
+import { syncWearableGoals } from './wearableGoalSync.js';
 
 // The only proactive/background process in the app. Everything else is purely reactive to
 // incoming Telegram messages (see index.js). This loop does five things on a timer:
@@ -13,7 +14,8 @@ import { getUserTimeZone } from './utils/localDate.js';
 //      missing one or has drifted — mainly catches events Shane types directly into Google
 //      Calendar himself, which skip Alex's create_event color-assignment entirely.
 //   4. Once/day, past 7am Shane's local time, runs the Investment Analyst Agent's daily
-//      briefing and queues it as a notification (see checkDailyInvestmentBriefing below).
+//      briefing and writes it to investment_briefings for the dashboard's Investments widget
+//      (see checkDailyInvestmentBriefing below) — no longer pushed to Telegram/notifications.
 //   5. Pushes undelivered 'high'/'medium' urgency notifications to Shane's Telegram and
 //      marks them delivered. 'low' urgency notifications are never proactively pushed —
 //      they just sit in the table for on-demand review via the Notification Manager.
@@ -122,12 +124,56 @@ async function checkFacetimeReminders() {
   }
 }
 
+// Rent reminder — mirrors n8n's old "LifeOS — Rent Reminder" workflow (same bills row, same
+// due_day check), moved here so it doesn't depend on n8n/Tailscale being up. n8n's version is
+// left running in parallel until Shane's compared a full cycle and is ready to turn it off.
+const RENT_BILL_ID = '29b24a6c-8518-40c0-9a43-1bc5d16b43ad';
+const RENT_WARNING_DAYS_BEFORE = 3; // TODO: confirm this matches n8n's exact warning window
+
+async function checkRentReminder() {
+  const { data: bill, error } = await supabase
+    .from('bills')
+    .select('id, name, amount, due_day, paid_this_month')
+    .eq('id', RENT_BILL_ID)
+    .single();
+  if (error || !bill) {
+    if (error) console.error('[Alex] Background loop: rent reminder bill lookup failed:', error.message);
+    return;
+  }
+  if (bill.paid_this_month) return;
+
+  const now = new Date();
+  const daysUntilDue = bill.due_day - now.getDate();
+  if (daysUntilDue > RENT_WARNING_DAYS_BEFORE || daysUntilDue < 0) return; // not in the warning window
+
+  const monthKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+  const title = `Reminder: ${bill.name} due (${monthKey})`;
+
+  const { data: existing, error: dedupeErr } = await supabase
+    .from('notifications')
+    .select('id')
+    .eq('title', title)
+    .limit(1);
+  if (dedupeErr) {
+    console.error('[Alex] Background loop: rent reminder dedupe check failed:', dedupeErr.message);
+    return;
+  }
+  if (existing && existing.length > 0) return;
+
+  const { error: insErr } = await supabase.from('notifications').insert({
+    source_agent: 'automation_agent',
+    urgency: 'medium',
+    title,
+    body: `${bill.name} ($${bill.amount}) is due on day ${bill.due_day} and isn't marked paid yet.`,
+  });
+  if (insErr) console.error('[Alex] Background loop: failed to queue rent reminder:', insErr.message);
+}
+
 // Runs the Investment Analyst Agent's daily briefing once/day, past 7am Shane's local time
 // (loose target — this loop only ticks every 5 min and the process can sleep on Render's free
 // tier, so "past 7am" rather than "exactly 7am" is what's actually achievable). Dedupes by
-// checking for a same-titled notification queued in the last 20 hours rather than doing precise
-// local-midnight math — simple, and safely spans the 24h gap between days without double-firing
-// or needing its own state table.
+// checking whether today's investment_briefings row already exists (that table upserts on
+// user_id+date, so this is exact — no more approximating with a 20-hour notification lookback).
 async function checkDailyInvestmentBriefing() {
   try {
     const timeZone = await getUserTimeZone();
@@ -136,18 +182,17 @@ async function checkDailyInvestmentBriefing() {
     );
     if (localHour < 7) return; // too early — try again on a later tick today
 
-    const twentyHoursAgo = new Date(Date.now() - 20 * 60 * 60 * 1000).toISOString();
+    const today = new Date().toISOString().slice(0, 10);
     const { data: recent, error } = await supabase
-      .from('notifications')
+      .from('investment_briefings')
       .select('id')
-      .eq('title', 'Daily Investment Briefing')
-      .gte('created_at', twentyHoursAgo)
+      .eq('date', today)
       .limit(1);
     if (error) {
       console.error('[Alex] Background loop: daily briefing dedupe check failed:', error.message);
       return;
     }
-    if (recent && recent.length > 0) return; // already sent today
+    if (recent && recent.length > 0) return; // already generated today
 
     const result = await runDailyInvestmentBriefing();
     if (!result.ok) {
@@ -189,9 +234,19 @@ export function startBackgroundLoop(bot, ownerId) {
       await evaluateAutomationRules();
       await checkFacetimeReminders();
       try {
-        await recolorFlexibleEvents();
+        await checkRentReminder();
       } catch (err) {
-        console.error('[Alex] Background loop: recolorFlexibleEvents failed:', err?.message ?? err);
+        console.error('[Alex] Background loop: checkRentReminder failed:', err?.message ?? err);
+      }
+      try {
+        await selfHealCalendarEvents();
+      } catch (err) {
+        console.error('[Alex] Background loop: selfHealCalendarEvents failed:', err?.message ?? err);
+      }
+      try {
+        await syncWearableGoals();
+      } catch (err) {
+        console.error('[Alex] Background loop: syncWearableGoals failed:', err?.message ?? err);
       }
       await checkDailyInvestmentBriefing();
       await pushPendingNotifications(bot, ownerId);
