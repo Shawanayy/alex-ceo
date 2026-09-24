@@ -24,6 +24,7 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 
 import { handleMessage } from './alex.js';
+import { toolDefs, runTool } from './tools.js';
 
 const PORT = process.env.PORT || 8787;
 const TOKEN = process.env.ALEX_REMOTE_MCP_TOKEN;
@@ -38,15 +39,25 @@ if (!TOKEN) {
 function buildServer() {
   const server = new Server({ name: 'alex-ceo', version: '1.0.0' }, { capabilities: { tools: {} } });
 
+  // Two kinds of tools:
+  //  1. ask_alex: the old "text Alex" path. It runs Alex's own model loop (Haiku by default) and
+  //     is kept only as a fallback.
+  //  2. Every tool in tools.js (add_dashboard_todo, the delegate_to_* sub-agents, etc.) exposed
+  //     DIRECTLY. The Claude app is now the orchestrator: it decides which tool to call, and the
+  //     specialist sub-agents do the domain work. No second orchestrator model in the middle.
+  const directTools = toolDefs.map((t) => ({
+    name: t.name,
+    description: t.description,
+    inputSchema: t.input_schema,
+  }));
+
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
     tools: [
       {
         name: 'ask_alex',
         description:
-          "Send a message to Alex, Shane Pinho's personal Chief of Staff assistant, and get his reply, " +
-          'exactly as if texting him on Telegram. Alex can manage classes, assignments, grades, study ' +
-          'sessions, flashcards, study guides, syllabus imports, internal tasks, remembered facts, and ' +
-          'Calendar/Gmail actions via his own sub-agents.',
+          "Fallback only: send a free-text message to Alex's own Telegram brain (a separate, smaller " +
+          'model loop) and get its reply. Prefer calling the specific tools directly.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -55,23 +66,35 @@ function buildServer() {
           required: ['message'],
         },
       },
+      ...directTools,
     ],
   }));
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
-    if (request.params.name !== 'ask_alex') {
-      throw new Error(`Unknown tool: ${request.params.name}`);
+    const name = request.params.name;
+    const args = request.params.arguments ?? {};
+
+    if (name === 'ask_alex') {
+      const { message } = args;
+      if (!message || typeof message !== 'string') {
+        throw new Error('"message" (string) is required.');
+      }
+      // Fixed session key, separate from Telegram's history. See alex.js getSessionHistory().
+      const reply = await handleMessage(message, null, 'cowork-alex');
+      return { content: [{ type: 'text', text: reply }] };
     }
-    const { message } = request.params.arguments ?? {};
-    if (!message || typeof message !== 'string') {
-      throw new Error('"message" (string) is required.');
+
+    if (!toolDefs.some((t) => t.name === name)) {
+      throw new Error(`Unknown tool: ${name}`);
     }
-    // Fixed, hardcoded session key — not per-request — since Cowork's MCP connector is stateless
-    // and gives us no way to tell different chat windows apart. This keeps Cowork's history fully
-    // separate from Telegram's; it relies on Shane only ever enabling this connector in his one
-    // dedicated Alex chat, same as agreed. See alex.js's getSessionHistory() for the full note.
-    const reply = await handleMessage(message, null, 'cowork-alex');
-    return { content: [{ type: 'text', text: reply }] };
+    try {
+      const result = await runTool(name, args, null);
+      const text = typeof result === 'string' ? result : JSON.stringify(result, null, 2);
+      return { content: [{ type: 'text', text: text ?? 'Done.' }] };
+    } catch (err) {
+      console.error(`[Alex Remote MCP] Tool ${name} failed:`, err);
+      return { content: [{ type: 'text', text: `Error in ${name}: ${err.message}` }], isError: true };
+    }
   });
 
   return server;
